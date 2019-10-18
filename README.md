@@ -76,13 +76,6 @@ library(EnsDb.Mmusculus.v79) #library(EnsDb.Hsapiens.v86) if human
 
     ## Loading required package: IRanges
 
-    ## 
-    ## Attaching package: 'IRanges'
-
-    ## The following object is masked from 'package:grDevices':
-    ## 
-    ##     windows
-
     ## Loading required package: GenomeInfoDb
 
     ## Loading required package: GenomicFeatures
@@ -199,6 +192,9 @@ library(scClustViz)
 
     ## Loading required package: shiny
 
+    ## This version of Shiny is designed to work with 'htmlwidgets' >= 1.5.
+    ##     Please upgrade via install.packages('htmlwidgets').
+
 Read in data
 ------------
 
@@ -256,6 +252,19 @@ hard_thresh <- 50
 mito_thresh <- median(sce$pct_counts_Mito) + mad(sce$pct_counts_Mito) * mads_thresh
 drop_mito <- sce$pct_counts_Mito > mito_thresh | sce$pct_counts_Mito > hard_thresh
 
+par(mar=c(3,3,2,1),mgp=2:0)
+hist(sce$pct_counts_Mito,breaks=50,xlab="% mitochondrial mRNA")
+abline(v=mito_thresh,col="red",lwd=2)
+mtext(paste(paste0(mads_thresh," MADs over median: "),
+            paste0(round(mito_thresh,2),"% mitochondrial mRNA"),
+            paste0(sum(drop_mito)," cells removed"),
+            sep="\n"),
+      side=3,line=-3,at=mito_thresh,adj=-0.05)
+```
+
+![](scRNAseqWorkflow_files/figure-markdown_github/filter_mito-1.png)
+
+``` r
 temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
 par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
 plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
@@ -269,11 +278,11 @@ plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
 points(sce$total_counts[drop_mito],sce$total_features_by_counts[drop_mito],
        pch=4,col="red")
 legend("topleft",bty="n",pch=4,col="red",
-       title=paste("Mito % >",round(mito_thresh)),
+       title=paste("Mito % >",round(mito_thresh,2)),
        legend=paste(sum(drop_mito),"cells"))
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/filter_mito-1.png)
+![](scRNAseqWorkflow_files/figure-markdown_github/filter_mito-2.png)
 
 ``` r
 sce <- sce[,!drop_mito]
@@ -595,20 +604,51 @@ plot_tsne(cell_coord=getEmb(seur,"tsne"),
           md_log=T)
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/tsne-1.png) Playing
-with the perplexity parameter can improve the visualization. Perplexity
-can be interpretted as the number of nearby cells to consider when
-trying to minimize distance between neighbouring cells.
+![](scRNAseqWorkflow_files/figure-markdown_github/tsne-1.png)
+
+Playing with the perplexity parameter can improve the visualization.
+Perplexity can be interpretted as the number of nearby cells to consider
+when trying to minimize distance between neighbouring cells.
 
 ``` r
 # only run if you've installed UMAP - see ?RunUMAP
 
 seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca")
+```
+
+    ## Warning: The default method for RunUMAP has changed from calling Python UMAP via reticulate to the R-native UWOT using the cosine metric
+    ## To use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'
+    ## This message will be shown once per session
+
+    ## 15:26:57 UMAP embedding parameters a = 0.9922 b = 1.112
+
+    ## 15:26:57 Read 1112 rows and found 20 numeric columns
+
+    ## 15:26:57 Using Annoy for neighbor search, n_neighbors = 30
+
+    ## 15:26:57 Building Annoy index with metric = cosine, n_trees = 50
+
+    ## 0%   10   20   30   40   50   60   70   80   90   100%
+
+    ## [----|----|----|----|----|----|----|----|----|----|
+
+    ## **************************************************|
+    ## 15:26:57 Writing NN index file to temp file /tmp/RtmpuJ8RKc/file7c56290f131
+    ## 15:26:57 Searching Annoy index using 1 thread, search_k = 3000
+    ## 15:26:58 Annoy recall = 100%
+    ## 15:26:58 Commencing smooth kNN distance calibration using 1 thread
+    ## 15:27:00 Initializing from normalized Laplacian + noise
+    ## 15:27:00 Commencing optimization for 500 epochs, with 41286 positive edges
+    ## 15:27:03 Optimization finished
+
+``` r
 plot_tsne(cell_coord=getEmb(seur,"umap"),
           md=getMD(seur)$total_counts,
           md_title="total_counts",
           md_log=T)
 ```
+
+![](scRNAseqWorkflow_files/figure-markdown_github/umap-1.png)
 
 Iterative clustering with scClustViz
 ------------------------------------
@@ -635,25 +675,35 @@ clustering is stopped. The output is saved as an sCVdata object for use
 in scClustViz.
 
 ``` r
+max_seurat_resolution <- 0.6 # For the sake of the demo, quit early.
+## ^ change this to something large (5?) to ensure iterations stop eventually.
 output_filename <- "./for_scClustViz.RData"
 FDRthresh <- 0.01 # FDR threshold for statistical tests
 min_num_DE <- 1
 seurat_resolution <- 0 # Starting resolution is this plus the jump value below.
 seurat_resolution_jump <- 0.2
-max_seurat_resolution <- 0.6 # For the sake of the demo, quit early.
 
 seur <- FindNeighbors(seur,dims=1:n_pc,verbose=F)
 
 sCVdata_list <- list()
 DE_bw_clust <- TRUE
 while(DE_bw_clust) {
+  if (seurat_resolution >= max_seurat_resolution) { break }
   seurat_resolution <- seurat_resolution + seurat_resolution_jump 
   # ^ iteratively incrementing resolution parameter 
-  if (seurat_resolution > max_seurat_resolution) { break }
   
   seur <- FindClusters(seur,resolution=seurat_resolution,verbose=F)
   
-  if (length(levels(Idents(seur))) <= 1) { next } 
+  message(" ")
+  message("------------------------------------------------------")
+  message(paste0("--------  res.",seurat_resolution," with ",
+                 length(levels(Idents(seur)))," clusters --------"))
+  message("------------------------------------------------------")
+  
+  if (length(levels(Idents(seur))) <= 1) { 
+    message("Only one cluster found, skipping analysis.")
+    next 
+  } 
   # ^ Only one cluster was found, need to bump up the resolution!
   
   if (length(sCVdata_list) >= 1) {
@@ -665,16 +715,12 @@ while(DE_bw_clust) {
         drop=T
       )))
       if (temp_cli == length(levels(Idents(seur)))) { 
+        message("Clusters unchanged from previous, skipping analysis.")
         next 
       }
     }
   }
   
-  message(" ")
-  message("------------------------------------------------------")
-  message(paste0("--------  res.",seurat_resolution," with ",
-                 length(levels(Idents(seur)))," clusters --------"))
-  message("------------------------------------------------------")
   curr_sCVdata <- CalcSCV(
     inD=seur,
     assayType="RNA",
@@ -719,6 +765,10 @@ while(DE_bw_clust) {
 
     ## -- Calculating differential expression cluster vs rest effect size --
 
+    ## Loading required package: presto
+
+    ## Loading required package: Rcpp
+
     ## -- Testing differential expression cluster vs rest --
 
     ## -- Testing differential expression between clusters --
@@ -747,12 +797,35 @@ while(DE_bw_clust) {
 
     ## Number of DE genes between nearest neighbours: 231
 
+    ## 
+
+    ## ------------------------------------------------------
+
+    ## --------  res.0.6 with 10 clusters --------
+
+    ## ------------------------------------------------------
+
+    ## -- Calculating gene detection rate per cluster --
+
+    ## -- Calculating mean detected gene expression per cluster --
+
+    ## -- Calculating mean gene expression per cluster --
+
+    ## -- Calculating differential expression cluster vs rest effect size --
+
+    ## -- Testing differential expression cluster vs rest --
+
+    ## -- Testing differential expression between clusters --
+
+    ## Number of DE genes between nearest neighbours: 101
+
 ``` r
 seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
 # cleaning redundant metadata
 
-seur <- DietSeurat(seur) 
+# seur <- seur@assays$RNA@scale.data <- matrix(nrow=0,ncol=0)
 # ^ shrinks the size of the Seurat object by removing the scaled matrix
+# could use DietSeurat, but it removes dimensionality reductions by default!
 
 save(sCVdata_list,seur,file=output_filename)
 ```
