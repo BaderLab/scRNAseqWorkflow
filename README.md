@@ -620,26 +620,26 @@ seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca")
     ## To use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'
     ## This message will be shown once per session
 
-    ## 15:26:57 UMAP embedding parameters a = 0.9922 b = 1.112
+    ## 12:38:05 UMAP embedding parameters a = 0.9922 b = 1.112
 
-    ## 15:26:57 Read 1112 rows and found 20 numeric columns
+    ## 12:38:05 Read 1112 rows and found 20 numeric columns
 
-    ## 15:26:57 Using Annoy for neighbor search, n_neighbors = 30
+    ## 12:38:05 Using Annoy for neighbor search, n_neighbors = 30
 
-    ## 15:26:57 Building Annoy index with metric = cosine, n_trees = 50
+    ## 12:38:05 Building Annoy index with metric = cosine, n_trees = 50
 
     ## 0%   10   20   30   40   50   60   70   80   90   100%
 
     ## [----|----|----|----|----|----|----|----|----|----|
 
     ## **************************************************|
-    ## 15:26:57 Writing NN index file to temp file /tmp/RtmpuJ8RKc/file7c56290f131
-    ## 15:26:57 Searching Annoy index using 1 thread, search_k = 3000
-    ## 15:26:58 Annoy recall = 100%
-    ## 15:26:58 Commencing smooth kNN distance calibration using 1 thread
-    ## 15:27:00 Initializing from normalized Laplacian + noise
-    ## 15:27:00 Commencing optimization for 500 epochs, with 41286 positive edges
-    ## 15:27:03 Optimization finished
+    ## 12:38:06 Writing NN index file to temp file /tmp/RtmpwhZgRe/file62954f190bfe
+    ## 12:38:06 Searching Annoy index using 1 thread, search_k = 3000
+    ## 12:38:06 Annoy recall = 100%
+    ## 12:38:06 Commencing smooth kNN distance calibration using 1 thread
+    ## 12:38:08 Initializing from normalized Laplacian + noise
+    ## 12:38:08 Commencing optimization for 500 epochs, with 41286 positive edges
+    ## 12:38:11 Optimization finished
 
 ``` r
 plot_tsne(cell_coord=getEmb(seur,"umap"),
@@ -823,9 +823,8 @@ while(DE_bw_clust) {
 seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
 # cleaning redundant metadata
 
-# seur <- seur@assays$RNA@scale.data <- matrix(nrow=0,ncol=0)
+seur <- DietSeurat(seur,dimreducs=Reductions(seur))
 # ^ shrinks the size of the Seurat object by removing the scaled matrix
-# could use DietSeurat, but it removes dimensionality reductions by default!
 
 save(sCVdata_list,seur,file=output_filename)
 ```

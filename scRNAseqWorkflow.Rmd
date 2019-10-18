@@ -402,9 +402,8 @@ while(DE_bw_clust) {
 seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
 # cleaning redundant metadata
 
-# seur <- seur@assays$RNA@scale.data <- matrix(nrow=0,ncol=0)
+seur <- DietSeurat(seur,dimreducs=Reductions(seur))
 # ^ shrinks the size of the Seurat object by removing the scaled matrix
-# could use DietSeurat, but it removes dimensionality reductions by default!
 
 save(sCVdata_list,seur,file=output_filename)
 ```
