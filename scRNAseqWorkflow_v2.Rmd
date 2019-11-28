@@ -206,7 +206,7 @@ barplot(cbind(table(cycScores$phases)),
 ## Normalization
 See SCTransform.
 
-```{r normalization}
+```{r normalization, warning=FALSE}
 seur <- SCTransform(seur,conserve.memory=T,verbose=F)
 
 # "iteration limit reached" warning can be safely ignored
