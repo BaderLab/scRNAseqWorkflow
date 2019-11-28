@@ -1,16 +1,18 @@
-Brendan’s skeleton scRNAseq workflow using scran, Seurat, and scClustViz
-========================================================================
+Brendan’s skeleton scRNAseq workflow (v2) using Seurat’s SCTransform and scClustViz
+===================================================================================
 
-This is an RStudio notebook that reflects my opinion of best practices
+This RStudio notebook (`scRNAseqWorkflow_v2.Rmd`) reflects my opinion of best practices
 in single-sample processing of scRNAseq data from the 10X Genomics
-platform. It is heavily based on the
+platform. It is heavily based on concepts outlined in the
 [SimpleSingleCell](https://bioconductor.org/packages/release/workflows/vignettes/simpleSingleCell/inst/doc/tenx.html)
-and [Seurat](https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html)
-tutorials. Normalization is performed using *scran*, with *Seurat* for
-clustering. Clustering is performed iteratively at higher resolutions
-and stopped when differential expression between clusters is lost, as
-assessed by [scClustViz](https://baderlab.github.io/scClustViz/) using
-the wilcoxon rank-sum test.
+tutorial, but builds on the popular
+[Seurat](https://satijalab.org/seurat/vignettes.html) toolkit.
+Normalization is performed using *Seurat’s* new method,
+[SCTransform](https://satijalab.org/seurat/v3.1/sctransform_vignette.html).
+Clustering is performed iteratively at higher resolutions and stopped
+when differential expression between clusters is lost, as assessed by
+[scClustViz](https://baderlab.github.io/scClustViz/) using the wilcoxon
+rank-sum test.
 
 At the start of every code block there will be variables to edit to
 modify the output of that block. I encourage users to run each block
@@ -21,18 +23,27 @@ is not plug-and-play.
 # This code block won't run, but shows the commands to install the required packages
 
 install.packages(c("Seurat","BiocManager","devtools","Matrix"))
-BiocManager::install(c("DropletUtils","scater","scran","AnnotationDbi",
-                       "EnsDb.Mmusculus.v79","EnsDb.Hsapiens.v86",
-                       "org.Mm.eg.db","org.Hs.eg.db"))
+BiocManager::install(c("scran","AnnotationDbi","org.Mm.eg.db","org.Hs.eg.db"))
 devtools::install_github("immunogenomics/presto")
 devtools::install_github("BaderLab/scClustViz")
+
+# Still installing various Bioconductor packages for useful utility functions,
 ```
 
 ``` r
-library(EnsDb.Mmusculus.v79) #library(EnsDb.Hsapiens.v86) if human
+library(Seurat)
+library(scClustViz)
 ```
 
-    ## Loading required package: ensembldb
+    ## Loading required package: shiny
+
+``` r
+library(org.Mm.eg.db) #library(org.Hs.eg.db) if human
+```
+
+    ## Loading required package: AnnotationDbi
+
+    ## Loading required package: stats4
 
     ## Loading required package: BiocGenerics
 
@@ -53,17 +64,22 @@ library(EnsDb.Mmusculus.v79) #library(EnsDb.Hsapiens.v86) if human
 
     ## The following objects are masked from 'package:base':
     ## 
-    ##     anyDuplicated, append, as.data.frame, basename, cbind,
-    ##     colnames, dirname, do.call, duplicated, eval, evalq, Filter,
-    ##     Find, get, grep, grepl, intersect, is.unsorted, lapply, Map,
-    ##     mapply, match, mget, order, paste, pmax, pmax.int, pmin,
-    ##     pmin.int, Position, rank, rbind, Reduce, rownames, sapply,
-    ##     setdiff, sort, table, tapply, union, unique, unsplit, which,
-    ##     which.max, which.min
+    ##     anyDuplicated, append, as.data.frame, basename, cbind, colnames,
+    ##     dirname, do.call, duplicated, eval, evalq, Filter, Find, get, grep,
+    ##     grepl, intersect, is.unsorted, lapply, Map, mapply, match, mget,
+    ##     order, paste, pmax, pmax.int, pmin, pmin.int, Position, rank,
+    ##     rbind, Reduce, rownames, sapply, setdiff, sort, table, tapply,
+    ##     union, unique, unsplit, which, which.max, which.min
 
-    ## Loading required package: GenomicRanges
+    ## Loading required package: Biobase
 
-    ## Loading required package: stats4
+    ## Welcome to Bioconductor
+    ## 
+    ##     Vignettes contain introductory material; view with
+    ##     'browseVignettes()'. To cite Bioconductor, see
+    ##     'citation("Biobase")', and for packages 'citation("pkgname")'.
+
+    ## Loading required package: IRanges
 
     ## Loading required package: S4Vectors
 
@@ -74,56 +90,199 @@ library(EnsDb.Mmusculus.v79) #library(EnsDb.Hsapiens.v86) if human
     ## 
     ##     expand.grid
 
-    ## Loading required package: IRanges
-
-    ## Loading required package: GenomeInfoDb
-
-    ## Loading required package: GenomicFeatures
-
-    ## Loading required package: AnnotationDbi
-
-    ## Loading required package: Biobase
-
-    ## Welcome to Bioconductor
     ## 
-    ##     Vignettes contain introductory material; view with
-    ##     'browseVignettes()'. To cite Bioconductor, see
-    ##     'citation("Biobase")', and for packages 'citation("pkgname")'.
 
-    ## Loading required package: AnnotationFilter
+Read in data
+------------
 
-    ## 
-    ## Attaching package: 'ensembldb'
-
-    ## The following object is masked from 'package:stats':
-    ## 
-    ##     filter
+10X Genomics Cell Ranger v3 uses a much better heuristic for determining
+empty droplets, so its generally safe to go straight to using the
+filtered matrix. Note that Read10X tries to assign gene symbols to
+rownames by default, appending “.\#” to repeat entries of the same gene
+name.
 
 ``` r
-library(org.Mm.eg.db) #library(org.Hs.eg.db) if human
+input_from_10x <- "filtered_feature_bc_matrix"
+
+seur <- CreateSeuratObject(counts=Read10X(input_from_10x),
+                           min.cells=1,min.features=1)
+show(seur)
 ```
 
-    ## 
+    ## An object of class Seurat 
+    ## 18085 features across 1301 samples within 1 assay 
+    ## Active assay: RNA (18085 features)
+
+Filter cells
+------------
+
+Filtering cells based on the proportion of mitochondrial gene
+transcripts per cell. A high proportion of mitochondrial gene
+transcripts are indicative of poor quality cells, probably due to
+compromised cell membranes.
 
 ``` r
-library(AnnotationDbi)
-library(Matrix)
+mito_gene_identifier <- "^mt-" # "^MT-" if human
+mads_thresh <- 4
+hard_thresh <- 50
+
+seur <- PercentageFeatureSet(seur, pattern = "^mt-", col.name = "pct_counts_Mito")
+mito_thresh <- median(seur$pct_counts_Mito) + mad(seur$pct_counts_Mito) * mads_thresh
+drop_mito <- seur$pct_counts_Mito > mito_thresh | seur$pct_counts_Mito > hard_thresh
+
+par(mar=c(3,3,2,1),mgp=2:0)
+hist(seur$pct_counts_Mito,breaks=50,xlab="% mitochondrial mRNA")
+abline(v=mito_thresh,col="red",lwd=2)
+mtext(paste(paste0(mads_thresh," MADs over median: "),
+            paste0(round(mito_thresh,2),"% mitochondrial mRNA"),
+            paste0(sum(drop_mito)," cells removed"),
+            sep="\n"),
+      side=3,line=-3,at=mito_thresh,adj=-0.05)
 ```
 
-    ## 
-    ## Attaching package: 'Matrix'
-
-    ## The following object is masked from 'package:S4Vectors':
-    ## 
-    ##     expand
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/filter_mito-1.png)
 
 ``` r
-library(DropletUtils)
+temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
+par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
+plot(seur$nCount_RNA,seur$nFeature_RNA,log="xy",pch=20,
+     xlab="nCount_RNA",ylab="nFeature_RNA",
+     col=temp_col[cut(c(0,1,seur$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
+legend("topleft",bty="n",title="Mito %",
+       legend=c(0,50,100),pch=20,col=temp_col[c(1,50,100)])
+plot(seur$nCount_RNA,seur$nFeature_RNA,log="xy",pch=20,
+     xlab="nCount_RNA",ylab="total_features",
+     col=temp_col[cut(c(0,1,seur$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
+points(seur$nCount_RNA[drop_mito],seur$nFeature_RNA[drop_mito],
+       pch=4,col="red")
+legend("topleft",bty="n",pch=4,col="red",
+       title=paste("Mito % >",round(mito_thresh,2)),
+       legend=paste(sum(drop_mito),"cells"))
 ```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/filter_mito-2.png)
+
+``` r
+seur <- seur[,!drop_mito]
+show(seur)
+```
+
+    ## An object of class Seurat 
+    ## 18085 features across 1144 samples within 1 assay 
+    ## Active assay: RNA (18085 features)
+
+It is important to manually inspect the relationship between library
+size and gene detection rates per cell to identify obvious outliers. In
+this case, we’ve identified a population of cells with a different
+relationship between library size and complexity, as well as one cell
+with a clearly outlying library size.
+
+``` r
+filt_intercept <- 100
+filt_slope <- .055
+to_inspect <- seur$nFeature_RNA < (seur$nCount_RNA * filt_slope + filt_intercept)
+
+temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
+par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
+plot(seur$nCount_RNA,seur$nFeature_RNA,log="",pch=20,
+     xlab="nCount_RNA",ylab="total_features",
+     main="Select outliers to inspect",
+     col=temp_col[cut(c(0,1,seur$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
+legend("topleft",bty="n",title="Mito %",
+       legend=c(0,50,100),pch=20,col=temp_col[c(1,50,100)])
+abline(filt_intercept,filt_slope,lwd=2,col="red")
+
+
+plot(seur$nCount_RNA,seur$nFeature_RNA,log="xy",pch=20,
+     xlab="nCount_RNA",ylab="total_features",
+     main="Select outliers to inspect",
+     col=temp_col[cut(c(0,1,seur$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
+points(seur$nCount_RNA[to_inspect],seur$nFeature_RNA[to_inspect],pch=1,col="red")
+legend("topleft",bty="n",pch=1,col="red",legend="Outliers")
+```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/filter_outlier-1.png)
+
+By comparing the transcriptomes of the outlier cells to the remaining
+cells, we see that they’re likely erythrocytes and can be removed.
+
+``` r
+in_DR <- RowNNZ(getExpr(seur,"RNA")[,!to_inspect]) / sum(!to_inspect)
+out_DR <- RowNNZ(getExpr(seur,"RNA")[,to_inspect]) / sum(to_inspect)
+in_MDGE <- pbapply::pbapply(getExpr(seur,"RNA")[,!to_inspect],1,function(X) mean(X[X > 0]))
+out_MDGE <- pbapply::pbapply(getExpr(seur,"RNA")[,to_inspect],1,function(X) mean(X[X > 0]))
+
+par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
+plot(in_DR,in_MDGE,pch=".",cex=2,log="y",
+     main="Gene expression in non-outliers",
+     xlab="Detection Rate",ylab="Mean Detected Count")
+points(in_DR[grep("^Hb[ab]",rownames(seur))],
+       in_MDGE[grep("^Hb[ab]",rownames(seur))],
+       pch=20,col="red")
+plot(out_DR,out_MDGE,pch=".",cex=2,log="y",
+     xlab="Detection Rate",ylab="Mean Detected Count",
+     main="Gene expression in outliers")
+points(out_DR[grep("^Hb[ab]",rownames(seur))],
+       out_MDGE[grep("^Hb[ab]",rownames(seur))],
+       pch=20,col="red")
+legend("topleft",bty="n",pch=20,col="red",legend="Haemoglobin")
+```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/inspect_outliers-1.png)
+
+``` r
+remove_outliers <- TRUE
+
+if (remove_outliers) {
+  seur <- seur[,!to_inspect]
+}
+show(seur)
+```
+
+    ## An object of class Seurat 
+    ## 18085 features across 1112 samples within 1 assay 
+    ## Active assay: RNA (18085 features)
+
+Cell cycle prediction with cyclone
+----------------------------------
+
+Cyclone (from the *scran* package) generates individual scores for each
+cell cycle phase. G1 and G2/M are assigned based on these scores, and
+any cells not strongly scoring for either phase are assigned to S phase.
+
+``` r
+cycloneSpeciesMarkers <- "mouse_cycle_markers.rds" # "human_cycle_markers.rds"
+egDB <- "org.Mm.eg.db" # "org.Hs.eg.db" if human
+
+if (require(scran)) {
+  # Cyclone cell-cycle prediction is in the scran package
+  anno <- select(get(egDB), keys=rownames(seur), keytype="SYMBOL", column="ENSEMBL")
+  cycScores <- cyclone(getExpr(seur,"RNA"),gene.names=anno$ENSEMBL[match(rownames(seur),anno$SYMBOL)],
+                       pairs=readRDS(system.file("exdata",cycloneSpeciesMarkers,package="scran")))
+  cycScores$phases <- as.factor(cycScores$phases)
+  cycScores$confidence <- sapply(seq_along(cycScores$phases),function(i)
+    cycScores$normalized.scores[i,as.character(cycScores$phases[i])])
+  for (l in names(cycScores)) {
+    if (is.null(dim(cycScores[[l]]))) {
+      names(cycScores[[l]]) <- colnames(seur)
+    } else {
+      rownames(cycScores[[l]]) <- colnames(seur)
+    }
+  }
+  seur <- AddMetaData(seur,cycScores$phases,col.name="CyclonePhase")
+  seur <- AddMetaData(seur,cycScores$confidence,col.name="CycloneConfidence")
+}
+```
+
+    ## Loading required package: scran
 
     ## Loading required package: SingleCellExperiment
 
     ## Loading required package: SummarizedExperiment
+
+    ## Loading required package: GenomicRanges
+
+    ## Loading required package: GenomeInfoDb
 
     ## Loading required package: DelayedArray
 
@@ -149,299 +308,14 @@ library(DropletUtils)
     ## 
     ##     aperm, apply, rowsum
 
-    ## Registered S3 method overwritten by 'R.oo':
-    ##   method        from       
-    ##   throw.default R.methodsS3
-
-``` r
-library(scater)
-```
-
-    ## Loading required package: ggplot2
-
     ## 
-    ## Attaching package: 'scater'
+    ## Attaching package: 'SummarizedExperiment'
 
-    ## The following object is masked from 'package:ensembldb':
-    ## 
-    ##     filter
-
-    ## The following object is masked from 'package:S4Vectors':
-    ## 
-    ##     rename
-
-    ## The following object is masked from 'package:stats':
-    ## 
-    ##     filter
-
-``` r
-library(scran)
-library(Seurat)
-```
-
-    ## 
-    ## Attaching package: 'Seurat'
-
-    ## The following object is masked from 'package:SummarizedExperiment':
+    ## The following object is masked from 'package:Seurat':
     ## 
     ##     Assays
 
-``` r
-library(scClustViz)
-```
-
-    ## Loading required package: shiny
-
-    ## This version of Shiny is designed to work with 'htmlwidgets' >= 1.5.
-    ##     Please upgrade via install.packages('htmlwidgets').
-
-Read in data
-------------
-
-10X Genomics Cell Ranger v3 uses a much better heuristic for determining
-empty droplets, so its generally safe to go straight to using the
-filtered matrix.
-
-``` r
-input_from_10x <- "filtered_feature_bc_matrix"
-
-sce <- read10xCounts(input_from_10x,col.names=T)
-sce <- sce[rowSums(counts(sce)) > 0,]
-show(sce)
-```
-
-    ## class: SingleCellExperiment 
-    ## dim: 18085 1301 
-    ## metadata(0):
-    ## assays(1): counts
-    ## rownames(18085): ENSMUSG00000051951 ENSMUSG00000089699 ...
-    ##   ENSMUSG00000063897 ENSMUSG00000095742
-    ## rowData names(3): ID Symbol Type
-    ## colnames(1301): AAACGAATCAAAGCCT-1 AAACGCTGTAATGTGA-1 ...
-    ##   TTTGGTTAGTAATCCC-1 TTTGTTGGTATGGAAT-1
-    ## colData names(2): Sample Barcode
-    ## reducedDimNames(0):
-    ## spikeNames(0):
-
-Filter cells
-------------
-
-``` r
-location <- mapIds(EnsDb.Mmusculus.v79, # EnsDb.Hsapiens.v86 if human
-                   keys=rowData(sce)$ID, 
-                   column="SEQNAME",
-                   keytype="GENEID") 
-# ^ you might have to change this depending on your rownames in the data
-rowData(sce)$CHR <- location
-
-sce <- calculateQCMetrics(sce,percent_top=NA,use_spikes=F,
-                          feature_controls=list(Mito=which(location=="MT")))
-rowData(sce)$pct_detected <- 100 - rowData(sce)$pct_dropout_by_counts
-rowData(sce)$mean_detected_counts <- rowData(sce)$mean_counts / (rowData(sce)$pct_detected * 0.01)
-```
-
-Filtering cells based on the proportion of mitochondrial gene
-transcripts per cell. A high proportion of mitochondrial gene
-transcripts are indicative of poor quality cells, probably due to
-compromised cell membranes.
-
-``` r
-mads_thresh <- 4
-hard_thresh <- 50
-
-mito_thresh <- median(sce$pct_counts_Mito) + mad(sce$pct_counts_Mito) * mads_thresh
-drop_mito <- sce$pct_counts_Mito > mito_thresh | sce$pct_counts_Mito > hard_thresh
-
-par(mar=c(3,3,2,1),mgp=2:0)
-hist(sce$pct_counts_Mito,breaks=50,xlab="% mitochondrial mRNA")
-abline(v=mito_thresh,col="red",lwd=2)
-mtext(paste(paste0(mads_thresh," MADs over median: "),
-            paste0(round(mito_thresh,2),"% mitochondrial mRNA"),
-            paste0(sum(drop_mito)," cells removed"),
-            sep="\n"),
-      side=3,line=-3,at=mito_thresh,adj=-0.05)
-```
-
-![](scRNAseqWorkflow_files/figure-markdown_github/filter_mito-1.png)
-
-``` r
-temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
-par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
-     xlab="total_counts",ylab="total_features",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
-legend("topleft",bty="n",title="Mito %",
-       legend=c(0,50,100),pch=20,col=temp_col[c(1,50,100)])
-plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
-     xlab="total_counts",ylab="total_features",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
-points(sce$total_counts[drop_mito],sce$total_features_by_counts[drop_mito],
-       pch=4,col="red")
-legend("topleft",bty="n",pch=4,col="red",
-       title=paste("Mito % >",round(mito_thresh,2)),
-       legend=paste(sum(drop_mito),"cells"))
-```
-
-![](scRNAseqWorkflow_files/figure-markdown_github/filter_mito-2.png)
-
-``` r
-sce <- sce[,!drop_mito]
-show(sce)
-```
-
-    ## class: SingleCellExperiment 
-    ## dim: 18085 1144 
-    ## metadata(0):
-    ## assays(1): counts
-    ## rownames(18085): ENSMUSG00000051951 ENSMUSG00000089699 ...
-    ##   ENSMUSG00000063897 ENSMUSG00000095742
-    ## rowData names(14): ID Symbol ... pct_detected mean_detected_counts
-    ## colnames(1144): AAACGCTGTAATGTGA-1 AAACGCTGTCCTGGGT-1 ...
-    ##   TTTGGTTAGTAATCCC-1 TTTGTTGGTATGGAAT-1
-    ## colData names(22): Sample Barcode ... log10_total_counts_Mito
-    ##   pct_counts_Mito
-    ## reducedDimNames(0):
-    ## spikeNames(0):
-
-It is important to manually inspect the relationship between library
-size and gene detection rates per cell to identify obvious outliers. In
-this case, we’ve identified a population of cells with a different
-relationship between library size and complexity, as well as one cell
-with a clearly outlying library size.
-
-``` r
-filt_intercept <- 100
-filt_slope <- .055
-to_inspect <- sce$total_features_by_counts < (sce$total_counts * filt_slope + filt_intercept)
-
-temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
-par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(sce$total_counts,sce$total_features_by_counts,log="",pch=20,
-     xlab="total_counts",ylab="total_features",
-     main="Select outliers to inspect",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
-legend("topleft",bty="n",title="Mito %",
-       legend=c(0,50,100),pch=20,col=temp_col[c(1,50,100)])
-abline(filt_intercept,filt_slope,lwd=2,col="red")
-
-
-plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
-     xlab="total_counts",ylab="total_features",
-     main="Select outliers to inspect",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
-points(sce$total_counts[to_inspect],sce$total_features_by_counts[to_inspect],pch=1,col="red")
-legend("topleft",bty="n",pch=1,col="red",legend="Outliers")
-```
-
-![](scRNAseqWorkflow_files/figure-markdown_github/filter_outlier-1.png)
-
-By comparing the transcriptomes of the outlier cells to the remaining
-cells, we see that they’re likely erythrocytes and can be removed.
-
-``` r
-out_DR <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) sum(X > 0) / length(X))
-out_MDGE <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) mean(X[X > 0]))
-
-par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(mean_detected_counts~pct_detected,data=rowData(sce),
-     pch=".",cex=2,log="y",main="Gene expression in all cells",
-     xlab="Detection Rate",ylab="Mean Detected Count")
-points(mean_detected_counts~pct_detected,
-       data=rowData(sce)[grep("^Hb[ab]",rowData(sce)$Symbol),],
-       pch=20,col="red")
-plot(out_DR,out_MDGE,pch=".",cex=2,log="y",
-     xlab="Detection Rate",ylab="Mean Detected Count",
-     main="Gene expression in outliers")
-points(out_DR[grep("^Hb[ab]",rowData(sce)$Symbol)],
-       out_MDGE[grep("^Hb[ab]",rowData(sce)$Symbol)],
-       pch=20,col="red")
-legend("topleft",bty="n",pch=20,col="red",legend="Haemoglobin")
-```
-
-![](scRNAseqWorkflow_files/figure-markdown_github/inspect_outliers-1.png)
-
-``` r
-remove_outliers <- TRUE
-
-if (remove_outliers) {
-  sce <- sce[,!to_inspect]
-}
-show(sce)
-```
-
-    ## class: SingleCellExperiment 
-    ## dim: 18085 1112 
-    ## metadata(0):
-    ## assays(1): counts
-    ## rownames(18085): ENSMUSG00000051951 ENSMUSG00000089699 ...
-    ##   ENSMUSG00000063897 ENSMUSG00000095742
-    ## rowData names(14): ID Symbol ... pct_detected mean_detected_counts
-    ## colnames(1112): AAACGCTGTAATGTGA-1 AAACGCTGTCCTGGGT-1 ...
-    ##   TTTGGTTAGTAATCCC-1 TTTGTTGGTATGGAAT-1
-    ## colData names(22): Sample Barcode ... log10_total_counts_Mito
-    ##   pct_counts_Mito
-    ## reducedDimNames(0):
-    ## spikeNames(0):
-
-Filter genes
-------------
-
-Remove genes detected in 3 or fewer cells, to prevent errors in
-normalization.
-
-``` r
-sce <- sce[rowSums(counts(sce)) >= 3,]
-rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
-# Assign gene symbols as rownames. 
-# You might have to change this depending on your rownames
-show(sce)
-```
-
-    ## class: SingleCellExperiment 
-    ## dim: 15669 1112 
-    ## metadata(0):
-    ## assays(1): counts
-    ## rownames(15669): Xkr4 Sox17 ... AC149090.1 CAAA01118383.1
-    ## rowData names(14): ID Symbol ... pct_detected mean_detected_counts
-    ## colnames(1112): AAACGCTGTAATGTGA-1 AAACGCTGTCCTGGGT-1 ...
-    ##   TTTGGTTAGTAATCCC-1 TTTGTTGGTATGGAAT-1
-    ## colData names(22): Sample Barcode ... log10_total_counts_Mito
-    ##   pct_counts_Mito
-    ## reducedDimNames(0):
-    ## spikeNames(0):
-
-Cell cycle prediction with cyclone
-----------------------------------
-
-Cyclone generates individual scores for each cell cycle phase. G1 and
-G2/M are assigned based on these scores, and any cells not strongly
-scoring for either phase are assigned to S phase.
-
-``` r
-cycloneSpeciesMarkers <- "mouse_cycle_markers.rds" # "human_cycle_markers.rds"
-egDB <- "org.Mm.eg.db" # "org.Hs.eg.db" if human
-
-anno <- select(get(egDB), keys=rownames(sce), keytype="SYMBOL", column="ENSEMBL")
-```
-
     ## 'select()' returned 1:many mapping between keys and columns
-
-``` r
-cycScores <- cyclone(sce,gene.names=anno$ENSEMBL[match(rownames(sce),anno$SYMBOL)],
-                         pairs=readRDS(system.file("exdata",cycloneSpeciesMarkers,package="scran")))
-cycScores$phases <- as.factor(cycScores$phases)
-cycScores$confidence <- sapply(seq_along(cycScores$phases),function(i)
-  cycScores$normalized.scores[i,as.character(cycScores$phases[i])])
-for (l in names(cycScores)) {
-  if (is.null(dim(cycScores[[l]]))) {
-    names(cycScores[[l]]) <- colnames(sce)
-  } else {
-    rownames(cycScores[[l]]) <- colnames(sce)
-  }
-}
-colData(sce)$CyclonePhase <- cycScores$phases
-colData(sce)$CycloneConfidence <- cycScores$confidence
-```
 
 ``` r
 layout(matrix(c(1,2,1,3,1,4),2),widths=c(2,5,1),heights=c(1,9))
@@ -455,9 +329,9 @@ boxplot(tapply(cycScores$confidence,cycScores$phases,c),
         ylab="Normalized score of assigned cell cycle phase")
 
 par(mar=c(3,3,1,1))
-cycDlibSize <- tapply(log10(colData(sce)$total_counts),cycScores$phases,function(X) density(X))
+cycDlibSize <- tapply(log10(seur$nCount_RNA),cycScores$phases,function(X) density(X))
 plot(x=NULL,y=NULL,ylab="Density",xlab=expression(Log[10]~"Library Size"),
-     xlim=range(log10(colData(sce)$total_counts)),
+     xlim=range(log10(seur$nCount_RNA)),
      ylim=c(min(sapply(cycDlibSize,function(X) min(X$y))),
             max(sapply(cycDlibSize,function(X) max(X$y)))))
 for (x in 1:length(cycDlibSize)) {
@@ -473,104 +347,3153 @@ barplot(cbind(table(cycScores$phases)),
   ylab="Number of cells")
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/unnamed-chunk-1-1.png)
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/plot_cyclone-1.png)
 
 Normalization
 -------------
 
-Next step is normalization. Marioni proposed a normalization technique
-that attempts to generate cell-specific size factors that are robust to
-differential expression between genes in a heterogenous sample, unlike
-simple library-size normalization
-(<a href="https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7" class="uri">https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7</a>).
-This method correlates strongly with library size normalization for
-homogenous samples, but solves a series of linear equations to
-deconvolute cell-specific size factors for normalization. In order to
-better handle heterogenous data, they suggest separating the data by
-simple heirarchical clustering of a Spearman correlation-based distance
-metric so that they can normalize the separate subpopulations separately
-to prevent the suppression of true differential expression during
-normalization.
-
-Normalization is carried out by assigning size factors per gene by the
-pooling and deconvolution method, then taking the log-ratio between each
-count and its size factor, and adding a pseudocount of one.
-Log-transforming the data stabilizes variance by reducing the impact of
-a few highly variable genes.
-
-Check that clusters aren’t too correlated with library size.
+See SCTransform.
 
 ``` r
-temp_qcl <- quickCluster(sce,use.ranks=F,method="igraph",
-                         irlba.args=list(maxit=1000)) # for convergence.
-sce <- computeSumFactors(sce,min.mean=0.01,cluster=temp_qcl)
-
-par(mfrow=c(1,2),mar=c(3,3,1,1),mgp=2:0)
-plot(sce$total_counts,sizeFactors(sce),log="xy",pch=20,
-     col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3")[temp_qcl])
-legend("topleft",bty="n",horiz=F,legend=levels(temp_qcl),title="Cluster",
-       pch=20,col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3"))
-plot(sce$total_counts,sizeFactors(sce),log="",pch=20,
-     col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3")[temp_qcl])
-legend("topleft",bty="n",horiz=F,legend=levels(temp_qcl),title="Cluster",
-       pch=20,col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3"))
+seur <- SCTransform(seur,conserve.memory=T,verbose=F)
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/sum_factors-1.png)
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in sqrt(1/i): NaNs produced
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in sqrt(1/i): NaNs produced
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in sqrt(1/i): NaNs produced
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in sqrt(1/i): NaNs produced
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in theta.ml(y = y, mu = fit$fitted): iteration limit reached
+
+    ## Warning in vst(umi = new("dgCMatrix", i = c(5L, 11L, 14L, 17L, 19L, 22L, : Will
+    ## not return corrected UMI because residual type is not set to 'pearson'
+
+    ## Calculating variance for residuals of type pearson for 14578 genes
+
+    ## 
+      |                                                                            
+      |                                                                      |   0%
+      |                                                                            
+      |=                                                                     |   2%
+      |                                                                            
+      |==                                                                    |   4%
+      |                                                                            
+      |====                                                                  |   5%
+      |                                                                            
+      |=====                                                                 |   7%
+      |                                                                            
+      |======                                                                |   9%
+      |                                                                            
+      |=======                                                               |  11%
+      |                                                                            
+      |=========                                                             |  12%
+      |                                                                            
+      |==========                                                            |  14%
+      |                                                                            
+      |===========                                                           |  16%
+      |                                                                            
+      |============                                                          |  18%
+      |                                                                            
+      |==============                                                        |  19%
+      |                                                                            
+      |===============                                                       |  21%
+      |                                                                            
+      |================                                                      |  23%
+      |                                                                            
+      |=================                                                     |  25%
+      |                                                                            
+      |==================                                                    |  26%
+      |                                                                            
+      |====================                                                  |  28%
+      |                                                                            
+      |=====================                                                 |  30%
+      |                                                                            
+      |======================                                                |  32%
+      |                                                                            
+      |=======================                                               |  33%
+      |                                                                            
+      |=========================                                             |  35%
+      |                                                                            
+      |==========================                                            |  37%
+      |                                                                            
+      |===========================                                           |  39%
+      |                                                                            
+      |============================                                          |  40%
+      |                                                                            
+      |=============================                                         |  42%
+      |                                                                            
+      |===============================                                       |  44%
+      |                                                                            
+      |================================                                      |  46%
+      |                                                                            
+      |=================================                                     |  47%
+      |                                                                            
+      |==================================                                    |  49%
+      |                                                                            
+      |====================================                                  |  51%
+      |                                                                            
+      |=====================================                                 |  53%
+      |                                                                            
+      |======================================                                |  54%
+      |                                                                            
+      |=======================================                               |  56%
+      |                                                                            
+      |=========================================                             |  58%
+      |                                                                            
+      |==========================================                            |  60%
+      |                                                                            
+      |===========================================                           |  61%
+      |                                                                            
+      |============================================                          |  63%
+      |                                                                            
+      |=============================================                         |  65%
+      |                                                                            
+      |===============================================                       |  67%
+      |                                                                            
+      |================================================                      |  68%
+      |                                                                            
+      |=================================================                     |  70%
+      |                                                                            
+      |==================================================                    |  72%
+      |                                                                            
+      |====================================================                  |  74%
+      |                                                                            
+      |=====================================================                 |  75%
+      |                                                                            
+      |======================================================                |  77%
+      |                                                                            
+      |=======================================================               |  79%
+      |                                                                            
+      |========================================================              |  81%
+      |                                                                            
+      |==========================================================            |  82%
+      |                                                                            
+      |===========================================================           |  84%
+      |                                                                            
+      |============================================================          |  86%
+      |                                                                            
+      |=============================================================         |  88%
+      |                                                                            
+      |===============================================================       |  89%
+      |                                                                            
+      |================================================================      |  91%
+      |                                                                            
+      |=================================================================     |  93%
+      |                                                                            
+      |==================================================================    |  95%
+      |                                                                            
+      |====================================================================  |  96%
+      |                                                                            
+      |===================================================================== |  98%
+      |                                                                            
+      |======================================================================| 100%
+
+    ## Calculating residuals of type pearson for 3000 genes
+
+    ## 
+      |                                                                            
+      |                                                                      |   0%
+      |                                                                            
+      |======                                                                |   8%
+      |                                                                            
+      |============                                                          |  17%
+      |                                                                            
+      |==================                                                    |  25%
+      |                                                                            
+      |=======================                                               |  33%
+      |                                                                            
+      |=============================                                         |  42%
+      |                                                                            
+      |===================================                                   |  50%
+      |                                                                            
+      |=========================================                             |  58%
+      |                                                                            
+      |===============================================                       |  67%
+      |                                                                            
+      |====================================================                  |  75%
+      |                                                                            
+      |==========================================================            |  83%
+      |                                                                            
+      |================================================================      |  92%
+      |                                                                            
+      |======================================================================| 100%
 
 ``` r
-sce <- normalize(sce)
+# "iteration limit reached" warning can be safely ignored
 ```
-
-Highly-variable genes
----------------------
-
-``` r
-new.trend <- makeTechTrend(x=sce)
-
-fit <- trendVar(sce,use.spikes=FALSE,loess.args=list(span=0.05))
-par(mar=c(3,3,2,1),mgp=2:0)
-plot(fit$mean,fit$var,pch=20,
-     xlab="Mean",ylab="Variance")
-curve(fit$trend(x),col="dodgerblue",add=TRUE)
-curve(new.trend(x),col="red",add=TRUE)
-```
-
-![](scRNAseqWorkflow_files/figure-markdown_github/unnamed-chunk-2-1.png)
-
-``` r
-fit$trend <- new.trend # overwrite trend.
-dec <- decomposeVar(fit=fit) # use per-gene variance estimates in 'fit'.
-top.dec <- dec[order(dec$bio, decreasing=TRUE),] 
-```
-
-To Seurat!
-----------
-
-``` r
-seur <- as.Seurat(sce)
-```
-
-    ## Warning: Feature names cannot have underscores ('_'), replacing with dashes
-    ## ('-')
-
-    ## Warning: Feature names cannot have underscores ('_'), replacing with dashes
-    ## ('-')
-
-``` r
-seur@meta.data <- seur@meta.data[,c("Sample","total_counts","total_features_by_counts",
-                                    "pct_counts_Mito","CyclonePhase","CycloneConfidence")]
-colnames(seur@meta.data)[colnames(seur@meta.data) == "total_features_by_counts"] <- "total_features"
-# ^cleaning up metadata
-```
-
-``` r
-seur <- ScaleData(seur,check.for.norm=F)
-```
-
-    ## Warning: The following arguments are not used: check.for.norm
-
-    ## Centering and scaling data matrix
 
 ``` r
 seur <- CellCycleScoring(seur,
@@ -578,33 +3501,92 @@ seur <- CellCycleScoring(seur,
                          s.features=cc.genes$s.genes)
 ```
 
-    ## Warning in AddModuleScore(object = object, features = features, name =
-    ## name, : Could not find enough features in the object from the following
-    ## feature lists: S.Score Attempting to match case...Could not find enough
-    ## features in the object from the following feature lists: G2M.Score
-    ## Attempting to match case...
+    ## Warning: The following features are not present in the object: MCM5, PCNA, TYMS,
+    ## FEN1, MCM2, MCM4, RRM1, UNG, GINS2, MCM6, CDCA7, DTL, PRIM1, UHRF1, MLF1IP,
+    ## HELLS, RFC2, RPA2, NASP, RAD51AP1, GMNN, WDR76, SLBP, CCNE2, UBR7, POLD3, MSH2,
+    ## ATAD2, RAD51, RRM2, CDC45, CDC6, EXO1, TIPIN, DSCC1, BLM, CASP8AP2, USP1, CLSPN,
+    ## POLA1, CHAF1B, BRIP1, E2F8, not searching for symbol synonyms
+
+    ## Warning: The following features are not present in the object: HMGB2, CDK1,
+    ## NUSAP1, UBE2C, BIRC5, TPX2, TOP2A, NDC80, CKS2, NUF2, CKS1B, MKI67, TMPO, CENPF,
+    ## TACC3, FAM64A, SMC4, CCNB2, CKAP2L, CKAP2, AURKB, BUB1, KIF11, ANP32E, TUBB4B,
+    ## GTSE1, KIF20B, HJURP, CDCA3, HN1, CDC20, TTK, CDC25C, KIF2C, RANGAP1, NCAPD2,
+    ## DLGAP5, CDCA2, CDCA8, ECT2, KIF23, HMMR, AURKA, PSRC1, ANLN, LBR, CKAP5, CENPE,
+    ## CTCF, NEK2, G2E3, GAS2L3, CBX5, CENPA, not searching for symbol synonyms
+
+    ## Warning in AddModuleScore(object = object, features = features, name = name, :
+    ## Could not find enough features in the object from the following feature lists:
+    ## S.Score Attempting to match case...Could not find enough features in the object
+    ## from the following feature lists: G2M.Score Attempting to match case...
 
 ``` r
-seur <- RunPCA(seur,features=rownames(top.dec)[1:2000],verbose=F)
-ElbowPlot(seur,ndims=50)
+par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
+temp_cycscores <- sapply(levels(seur$Phase),function(X) 
+  getMD(seur)[seur$Phase == X,c("S.Score", "G2M.Score")],simplify=F)
+plot(NA,NA,xlim=range(seur$S.Score),ylim=range(seur$G2M.Score),
+     xlab="S.Score",ylab="G2M.Score",main="Cell cycle assignment confidence")
+for (X in seq_along(temp_cycscores)) {
+  points(temp_cycscores[[X]]$S.Score,temp_cycscores[[X]]$G2M.Score,
+         pch=20,col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3")[X])
+}
+legend("topright",bty="n",pch=20,
+       col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3"),
+       legend=names(temp_cycscores))
+
+cycDlibSize <- tapply(log10(seur$nCount_SCT),seur$Phase,function(X) density(X))
+plot(x=NULL,y=NULL,main="Cell cycle library size",
+     ylab="Density",xlab=expression(Log[10]~"Corrected Library Size"),
+     xlim=range(log10(seur$nCount_SCT)),
+     ylim=c(min(sapply(cycDlibSize,function(X) min(X$y))),
+            max(sapply(cycDlibSize,function(X) max(X$y)))))
+for (x in 1:length(cycDlibSize)) {
+  lines(cycDlibSize[[x]],lwd=3,
+        col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3")[x])
+}
+legend("topleft",bty="n",horiz=T,lwd=rep(3,3),legend=levels(cycScores$phases),
+       col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3"))
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/pca-1.png)
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/seurat_cell_cycle-1.png)
+
+``` r
+seur <- RunPCA(seur,assay="SCT",verbose=F)
+plot(100 * seur@reductions$pca@stdev^2 / seur@reductions$pca@misc$total.variance,
+     pch=20,xlab="Principal Component",ylab="% variance explained",log="y")
+```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/pca-1.png)
 
 Select the number of principle components to use in downstream analysis,
 and set *n\_pc* accordingly.
 
 ``` r
-n_pc <- 20
+n_pc <- 23
 
 seur <- RunTSNE(seur,dims=1:n_pc,reduction="pca",perplexity=30)
+par(mfrow=c(1,2))
 plot_tsne(cell_coord=getEmb(seur,"tsne"),
-          md=getMD(seur)$total_counts,
-          md_title="total_counts",
-          md_log=T)
+          md=getMD(seur)$nFeature_SCT,
+          md_title="nFeature_SCT",
+          md_log=F)
+plot_tsne(cell_coord=getEmb(seur,"tsne"),
+          md=getMD(seur)$pct_counts_Mito,
+          md_title="pct_counts_Mito",
+          md_log=F)
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/tsne-1.png)
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/tsne-1.png)
+
+``` r
+plot_tsne(cell_coord=getEmb(seur,"tsne"),
+          md=getMD(seur)$CyclonePhase,
+          md_title="CyclonePhase")
+plot_tsne(cell_coord=getEmb(seur,"tsne"),
+          md=getMD(seur)$Phase,
+          md_title="Phase")
+```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/tsne-2.png)
 
 Playing with the perplexity parameter can improve the visualization.
 Perplexity can be interpretted as the number of nearby cells to consider
@@ -620,35 +3602,51 @@ seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca")
     ## To use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'
     ## This message will be shown once per session
 
-    ## 12:38:05 UMAP embedding parameters a = 0.9922 b = 1.112
+    ## 12:20:25 UMAP embedding parameters a = 0.9922 b = 1.112
 
-    ## 12:38:05 Read 1112 rows and found 20 numeric columns
+    ## 12:20:25 Read 1112 rows and found 23 numeric columns
 
-    ## 12:38:05 Using Annoy for neighbor search, n_neighbors = 30
+    ## 12:20:25 Using Annoy for neighbor search, n_neighbors = 30
 
-    ## 12:38:05 Building Annoy index with metric = cosine, n_trees = 50
+    ## 12:20:25 Building Annoy index with metric = cosine, n_trees = 50
 
     ## 0%   10   20   30   40   50   60   70   80   90   100%
 
     ## [----|----|----|----|----|----|----|----|----|----|
 
     ## **************************************************|
-    ## 12:38:06 Writing NN index file to temp file /tmp/RtmpwhZgRe/file62954f190bfe
-    ## 12:38:06 Searching Annoy index using 1 thread, search_k = 3000
-    ## 12:38:06 Annoy recall = 100%
-    ## 12:38:06 Commencing smooth kNN distance calibration using 1 thread
-    ## 12:38:08 Initializing from normalized Laplacian + noise
-    ## 12:38:08 Commencing optimization for 500 epochs, with 41286 positive edges
-    ## 12:38:11 Optimization finished
+    ## 12:20:25 Writing NN index file to temp file /tmp/Rtmp7T46Ig/file2100608f7d6e
+    ## 12:20:25 Searching Annoy index using 1 thread, search_k = 3000
+    ## 12:20:26 Annoy recall = 100%
+    ## 12:20:26 Commencing smooth kNN distance calibration using 1 thread
+    ## 12:20:27 Initializing from normalized Laplacian + noise
+    ## 12:20:27 Commencing optimization for 500 epochs, with 39546 positive edges
+    ## 12:20:30 Optimization finished
+
+``` r
+par(mfrow=c(1,2))
+plot_tsne(cell_coord=getEmb(seur,"umap"),
+          md=getMD(seur)$nFeature_SCT,
+          md_title="nFeature_SCT",
+          md_log=F)
+plot_tsne(cell_coord=getEmb(seur,"umap"),
+          md=getMD(seur)$pct_counts_Mito,
+          md_title="pct_counts_Mito",
+          md_log=F)
+```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/umap-1.png)
 
 ``` r
 plot_tsne(cell_coord=getEmb(seur,"umap"),
-          md=getMD(seur)$total_counts,
-          md_title="total_counts",
-          md_log=T)
+          md=getMD(seur)$CyclonePhase,
+          md_title="CyclonePhase")
+plot_tsne(cell_coord=getEmb(seur,"umap"),
+          md=getMD(seur)$Phase,
+          md_title="Phase")
 ```
 
-![](scRNAseqWorkflow_files/figure-markdown_github/umap-1.png)
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/umap-2.png)
 
 Iterative clustering with scClustViz
 ------------------------------------
@@ -677,13 +3675,13 @@ in scClustViz.
 ``` r
 max_seurat_resolution <- 0.6 # For the sake of the demo, quit early.
 ## ^ change this to something large (5?) to ensure iterations stop eventually.
-output_filename <- "./for_scClustViz.RData"
+output_filename <- "./for_scClustViz_v2.RData"
 FDRthresh <- 0.01 # FDR threshold for statistical tests
 min_num_DE <- 1
 seurat_resolution <- 0 # Starting resolution is this plus the jump value below.
 seurat_resolution_jump <- 0.2
 
-seur <- FindNeighbors(seur,dims=1:n_pc,verbose=F)
+seur <- FindNeighbors(seur,reduction="pca",dims=1:n_pc,verbose=F)
 
 sCVdata_list <- list()
 DE_bw_clust <- TRUE
@@ -723,12 +3721,13 @@ while(DE_bw_clust) {
   
   curr_sCVdata <- CalcSCV(
     inD=seur,
-    assayType="RNA",
+    assayType="SCT",
+    assaySlot="counts",
     cl=Idents(seur), 
     # ^ your most recent clustering results get stored in the Seurat "ident" slot
-    exponent=2, 
-    # ^ since you used scran for normalization, data is in log2 space.
-    pseudocount=1,
+    exponent=NA, 
+    # ^ going to use the corrected counts from SCTransform
+    pseudocount=NA,
     DRthresh=0.1,
     DRforClust="pca",
     calcSil=T,
@@ -751,17 +3750,13 @@ while(DE_bw_clust) {
 
     ## ------------------------------------------------------
 
-    ## --------  res.0.2 with 5 clusters --------
+    ## --------  res.0.2 with 6 clusters --------
 
     ## ------------------------------------------------------
 
     ## Loading required package: cluster
 
-    ## -- Calculating gene detection rate per cluster --
-
-    ## -- Calculating mean detected gene expression per cluster --
-
-    ## -- Calculating mean gene expression per cluster --
+    ## -- Calculating cluster-wise gene statistics --
 
     ## -- Calculating differential expression cluster vs rest effect size --
 
@@ -773,21 +3768,17 @@ while(DE_bw_clust) {
 
     ## -- Testing differential expression between clusters --
 
-    ## Number of DE genes between nearest neighbours: 214
+    ## Number of DE genes between nearest neighbours: 178
 
     ## 
 
     ## ------------------------------------------------------
 
-    ## --------  res.0.4 with 7 clusters --------
+    ## --------  res.0.4 with 9 clusters --------
 
     ## ------------------------------------------------------
 
-    ## -- Calculating gene detection rate per cluster --
-
-    ## -- Calculating mean detected gene expression per cluster --
-
-    ## -- Calculating mean gene expression per cluster --
+    ## -- Calculating cluster-wise gene statistics --
 
     ## -- Calculating differential expression cluster vs rest effect size --
 
@@ -795,7 +3786,7 @@ while(DE_bw_clust) {
 
     ## -- Testing differential expression between clusters --
 
-    ## Number of DE genes between nearest neighbours: 231
+    ## Number of DE genes between nearest neighbours: 49
 
     ## 
 
@@ -805,11 +3796,7 @@ while(DE_bw_clust) {
 
     ## ------------------------------------------------------
 
-    ## -- Calculating gene detection rate per cluster --
-
-    ## -- Calculating mean detected gene expression per cluster --
-
-    ## -- Calculating mean gene expression per cluster --
+    ## -- Calculating cluster-wise gene statistics --
 
     ## -- Calculating differential expression cluster vs rest effect size --
 
@@ -817,10 +3804,11 @@ while(DE_bw_clust) {
 
     ## -- Testing differential expression between clusters --
 
-    ## Number of DE genes between nearest neighbours: 101
+    ## Number of DE genes between nearest neighbours: 72
 
 ``` r
 seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
+seur@meta.data <- seur@meta.data[,!grepl("^SCT_snn_res",colnames(seur@meta.data))]
 # cleaning redundant metadata
 
 seur <- DietSeurat(seur,dimreducs=Reductions(seur))
