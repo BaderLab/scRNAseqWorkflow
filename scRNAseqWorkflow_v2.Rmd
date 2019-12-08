@@ -7,7 +7,8 @@ output:
 
 # Brendan's skeleton scRNAseq workflow (v2) using Seurat's SCTransform and scClustViz
 
-This RStudio notebook (`scRNAseqWorkflow_v2.Rmd`) reflects my opinion of best practices in single-sample processing of scRNAseq data from the 10X Genomics platform.  It is heavily based on concepts outlined in the [SimpleSingleCell](https://bioconductor.org/packages/release/workflows/vignettes/simpleSingleCell/inst/doc/tenx.html) tutorial, but builds on the popular [Seurat](https://satijalab.org/seurat/vignettes.html) toolkit. Normalization is performed using *Seurat's* new method, [SCTransform](https://satijalab.org/seurat/v3.1/sctransform_vignette.html).  Clustering is performed iteratively at higher resolutions and stopped when differential expression between clusters is lost, as assessed by [scClustViz](https://baderlab.github.io/scClustViz/) using the wilcoxon rank-sum test.
+This RStudio notebook (`scRNAseqWorkflow_v2.Rmd`) reflects my opinion of best practices in single-sample processing of scRNAseq data from the 10X Genomics platform.  It is heavily based on concepts outlined in the [SimpleSingleCell](https://bioconductor.org/packages/release/workflows/vignettes/simpleSingleCell/inst/doc/tenx.html) tutorial, but builds on the popular [Seurat](https://satijalab.org/seurat/vignettes.html) toolkit. Normalization is performed using *Seurat's* new method, [SCTransform](https://satijalab.org/seurat/v3.1/sctransform_vignette.html).  Clustering is performed iteratively at higher resolutions and stopped when differential expression between clusters is lost, as assessed by [scClustViz](https://baderlab.github.io/scClustViz/) using the wilcoxon rank-sum test.  
+For the workflow using [scran](http://bioconductor.org/packages/release/bioc/vignettes/scran/inst/doc/scran.html#3_normalizing_cell-specific_biases), see `scRNAseqWorkflow.Rmd`.  
 
 At the start of every code block there will be variables to edit to modify the output of that block.  I encourage users to run each block individual, assess the output, and modify as needed.  scRNAseq analysis is not plug-and-play.
 
@@ -253,14 +254,44 @@ plot(100 * seur@reductions$pca@stdev^2 / seur@reductions$pca@misc$total.variance
 
 Select the number of principle components to use in downstream analysis, and set *n_pc* accordingly.
 
-```{r tsne}
+```{r pc_corr}
 n_pc <- 23
 
+temp_keepMD <- sapply(getMD(seur),function(X) {
+  if (is.factor(X)) { 
+    if (length(levels(X)) == 1) {
+      FALSE
+    } else {
+      TRUE
+    }
+  } else {
+    TRUE
+  }
+})
+seur@meta.data <- seur@meta.data[temp_keepMD]
+pc_corrs <- sapply(getMD(seur),function(MD) {
+  if (is.numeric(MD)) {
+    cor(getEmb(seur,"pca")[,1:n_pc],MD)
+  } else {
+    apply(getEmb(seur,"pca")[,1:n_pc],2,function(Y)
+      sqrt(summary(lm(Y~MD))$adj.r.squared))
+  }
+})
+par(mfrow=c(2,2),mar=4:1,mgp=2:0)
+for (X in colnames(pc_corrs)) {
+  barplot(pc_corrs[,X],las=3,main=X,ylab=paste("Corr w/",X),
+          ylim=switch((min(pc_corrs[,X],na.rm=T) < 0) + 1,c(0,1),c(-1,1)))
+}
+```
+Check to see that no PC strongly correlates with technical factors in an unexpected manner.  For categorical factors, the adjusted R^2 value of a logistic regression was used to calculate correlation.  
+If there is strong correlation with technical factors, these can be regressed out in the `SCTransform` function.
+
+```{r tsne}
 seur <- RunTSNE(seur,dims=1:n_pc,reduction="pca",perplexity=30)
 par(mfrow=c(1,2))
 plot_tsne(cell_coord=getEmb(seur,"tsne"),
-          md=getMD(seur)$nFeature_SCT,
-          md_title="nFeature_SCT",
+          md=getMD(seur)$nFeature_RNA,
+          md_title="nFeature_RNA",
           md_log=F)
 plot_tsne(cell_coord=getEmb(seur,"tsne"),
           md=getMD(seur)$pct_counts_Mito,
@@ -283,8 +314,8 @@ Playing with the perplexity parameter can improve the visualization.  Perplexity
 seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca")
 par(mfrow=c(1,2))
 plot_tsne(cell_coord=getEmb(seur,"umap"),
-          md=getMD(seur)$nFeature_SCT,
-          md_title="nFeature_SCT",
+          md=getMD(seur)$nFeature_RNA,
+          md_title="nFeature_RNA",
           md_log=F)
 plot_tsne(cell_coord=getEmb(seur,"umap"),
           md=getMD(seur)$pct_counts_Mito,
@@ -346,16 +377,27 @@ while(DE_bw_clust) {
       )))
       if (temp_cli == length(levels(Idents(seur)))) { 
         message("Clusters unchanged from previous, skipping analysis.")
+        seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
+        seur@meta.data <- seur@meta.data[,-ncol(seur@meta.data)]
         next 
       }
     }
+  }
+  seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
+  if (all(Idents(seur) == seur@meta.data[,ncol(seur@meta.data)])) {
+    levels(seur@meta.data[,ncol(seur@meta.data)]) <- 
+      as.integer(levels(seur@meta.data[,ncol(seur@meta.data)])) + 1
+    seur@active.ident <- seur@meta.data[,ncol(seur@meta.data)]
+    names(seur@active.ident) <- rownames(seur@meta.data)
+  } else {
+    stop("Made stupid assumptions about Seurat's metadata / cluster organization.")
   }
   
   curr_sCVdata <- CalcSCV(
     inD=seur,
     assayType="SCT",
     assaySlot="counts",
-    cl=Idents(seur), 
+    cl=seur@meta.data[,ncol(seur@meta.data)], 
     # ^ your most recent clustering results get stored in the Seurat "ident" slot
     exponent=NA, 
     # ^ going to use the corrected counts from SCTransform
@@ -374,13 +416,8 @@ while(DE_bw_clust) {
   if (min(DE_bw_NN) < min_num_DE) { DE_bw_clust <- FALSE }
   # ^ If no DE genes between nearest neighbours, don't loop again.
   
-  sCVdata_list[[paste0("res.",seurat_resolution)]] <- curr_sCVdata
+  sCVdata_list[[colnames(seur@meta.data)[ncol(seur@meta.data)]]] <- curr_sCVdata
 }
-
-seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
-seur@meta.data <- seur@meta.data[,!grepl("^SCT_snn_res",colnames(seur@meta.data))]
-# cleaning redundant metadata
-
 seur <- DietSeurat(seur,dimreducs=Reductions(seur))
 # ^ shrinks the size of the Seurat object by removing the scaled matrix
 

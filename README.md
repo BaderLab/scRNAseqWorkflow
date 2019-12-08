@@ -1,9 +1,9 @@
 Brendan’s skeleton scRNAseq workflow (v2) using Seurat’s SCTransform and scClustViz
 ===================================================================================
 
-This RStudio notebook (`scRNAseqWorkflow_v2.Rmd`) reflects my opinion of best practices
-in single-sample processing of scRNAseq data from the 10X Genomics
-platform. It is heavily based on concepts outlined in the
+This RStudio notebook (`scRNAseqWorkflow_v2.Rmd`) reflects my opinion of
+best practices in single-sample processing of scRNAseq data from the 10X
+Genomics platform. It is heavily based on concepts outlined in the
 [SimpleSingleCell](https://bioconductor.org/packages/release/workflows/vignettes/simpleSingleCell/inst/doc/tenx.html)
 tutorial, but builds on the popular
 [Seurat](https://satijalab.org/seurat/vignettes.html) toolkit.
@@ -12,7 +12,8 @@ Normalization is performed using *Seurat’s* new method,
 Clustering is performed iteratively at higher resolutions and stopped
 when differential expression between clusters is lost, as assessed by
 [scClustViz](https://baderlab.github.io/scClustViz/) using the wilcoxon
-rank-sum test.
+rank-sum test.  
+For the workflow using [scran](http://bioconductor.org/packages/release/bioc/vignettes/scran/inst/doc/scran.html#3_normalizing_cell-specific_biases), see `scRNAseqWorkflow.Rmd`.  
 
 At the start of every code block there will be variables to edit to
 modify the output of that block. I encourage users to run each block
@@ -89,6 +90,13 @@ library(org.Mm.eg.db) #library(org.Hs.eg.db) if human
     ## The following object is masked from 'package:base':
     ## 
     ##     expand.grid
+
+    ## 
+    ## Attaching package: 'IRanges'
+
+    ## The following object is masked from 'package:grDevices':
+    ## 
+    ##     windows
 
     ## 
 
@@ -356,6 +364,159 @@ See SCTransform.
 
 ``` r
 seur <- SCTransform(seur,conserve.memory=T,verbose=F)
+```
+
+    ## Calculating variance for residuals of type pearson for 14578 genes
+
+    ## 
+      |                                                                            
+      |                                                                      |   0%
+      |                                                                            
+      |=                                                                     |   2%
+      |                                                                            
+      |==                                                                    |   4%
+      |                                                                            
+      |====                                                                  |   5%
+      |                                                                            
+      |=====                                                                 |   7%
+      |                                                                            
+      |======                                                                |   9%
+      |                                                                            
+      |=======                                                               |  11%
+      |                                                                            
+      |=========                                                             |  12%
+      |                                                                            
+      |==========                                                            |  14%
+      |                                                                            
+      |===========                                                           |  16%
+      |                                                                            
+      |============                                                          |  18%
+      |                                                                            
+      |==============                                                        |  19%
+      |                                                                            
+      |===============                                                       |  21%
+      |                                                                            
+      |================                                                      |  23%
+      |                                                                            
+      |=================                                                     |  25%
+      |                                                                            
+      |==================                                                    |  26%
+      |                                                                            
+      |====================                                                  |  28%
+      |                                                                            
+      |=====================                                                 |  30%
+      |                                                                            
+      |======================                                                |  32%
+      |                                                                            
+      |=======================                                               |  33%
+      |                                                                            
+      |=========================                                             |  35%
+      |                                                                            
+      |==========================                                            |  37%
+      |                                                                            
+      |===========================                                           |  39%
+      |                                                                            
+      |============================                                          |  40%
+      |                                                                            
+      |=============================                                         |  42%
+      |                                                                            
+      |===============================                                       |  44%
+      |                                                                            
+      |================================                                      |  46%
+      |                                                                            
+      |=================================                                     |  47%
+      |                                                                            
+      |==================================                                    |  49%
+      |                                                                            
+      |====================================                                  |  51%
+      |                                                                            
+      |=====================================                                 |  53%
+      |                                                                            
+      |======================================                                |  54%
+      |                                                                            
+      |=======================================                               |  56%
+      |                                                                            
+      |=========================================                             |  58%
+      |                                                                            
+      |==========================================                            |  60%
+      |                                                                            
+      |===========================================                           |  61%
+      |                                                                            
+      |============================================                          |  63%
+      |                                                                            
+      |=============================================                         |  65%
+      |                                                                            
+      |===============================================                       |  67%
+      |                                                                            
+      |================================================                      |  68%
+      |                                                                            
+      |=================================================                     |  70%
+      |                                                                            
+      |==================================================                    |  72%
+      |                                                                            
+      |====================================================                  |  74%
+      |                                                                            
+      |=====================================================                 |  75%
+      |                                                                            
+      |======================================================                |  77%
+      |                                                                            
+      |=======================================================               |  79%
+      |                                                                            
+      |========================================================              |  81%
+      |                                                                            
+      |==========================================================            |  82%
+      |                                                                            
+      |===========================================================           |  84%
+      |                                                                            
+      |============================================================          |  86%
+      |                                                                            
+      |=============================================================         |  88%
+      |                                                                            
+      |===============================================================       |  89%
+      |                                                                            
+      |================================================================      |  91%
+      |                                                                            
+      |=================================================================     |  93%
+      |                                                                            
+      |==================================================================    |  95%
+      |                                                                            
+      |====================================================================  |  96%
+      |                                                                            
+      |===================================================================== |  98%
+      |                                                                            
+      |======================================================================| 100%
+
+    ## Calculating residuals of type pearson for 3000 genes
+
+    ## 
+      |                                                                            
+      |                                                                      |   0%
+      |                                                                            
+      |======                                                                |   8%
+      |                                                                            
+      |============                                                          |  17%
+      |                                                                            
+      |==================                                                    |  25%
+      |                                                                            
+      |=======================                                               |  33%
+      |                                                                            
+      |=============================                                         |  42%
+      |                                                                            
+      |===================================                                   |  50%
+      |                                                                            
+      |=========================================                             |  58%
+      |                                                                            
+      |===============================================                       |  67%
+      |                                                                            
+      |====================================================                  |  75%
+      |                                                                            
+      |==========================================================            |  83%
+      |                                                                            
+      |================================================================      |  92%
+      |                                                                            
+      |======================================================================| 100%
+
+``` r
 # "iteration limit reached" warning can be safely ignored
 ```
 
@@ -427,11 +588,69 @@ and set *n\_pc* accordingly.
 ``` r
 n_pc <- 23
 
+temp_keepMD <- sapply(getMD(seur),function(X) {
+  if (is.factor(X)) { 
+    if (length(levels(X)) == 1) {
+      FALSE
+    } else {
+      TRUE
+    }
+  } else {
+    TRUE
+  }
+})
+seur@meta.data <- seur@meta.data[temp_keepMD]
+pc_corrs <- sapply(getMD(seur),function(MD) {
+  if (is.numeric(MD)) {
+    cor(getEmb(seur,"pca")[,1:n_pc],MD)
+  } else {
+    apply(getEmb(seur,"pca")[,1:n_pc],2,function(Y)
+      sqrt(summary(lm(Y~MD))$adj.r.squared))
+  }
+})
+```
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+    ## Warning in sqrt(summary(lm(Y ~ MD))$adj.r.squared): NaNs produced
+
+``` r
+par(mfrow=c(2,2),mar=4:1,mgp=2:0)
+for (X in colnames(pc_corrs)) {
+  barplot(pc_corrs[,X],las=3,main=X,ylab=paste("Corr w/",X),
+          ylim=switch((min(pc_corrs[,X],na.rm=T) < 0) + 1,c(0,1),c(-1,1)))
+}
+```
+
+![](scRNAseqWorkflow_v2_files/figure-markdown_github/pc_corr-1.png)![](scRNAseqWorkflow_v2_files/figure-markdown_github/pc_corr-2.png)![](scRNAseqWorkflow_v2_files/figure-markdown_github/pc_corr-3.png)
+Check to see that no PC strongly correlates with technical factors in an
+unexpected manner. For categorical factors, the adjusted R^2 value of a
+logistic regression was used to calculate correlation.  
+If there is strong correlation with technical factors, these can be
+regressed out in the `SCTransform` function.
+
+``` r
 seur <- RunTSNE(seur,dims=1:n_pc,reduction="pca",perplexity=30)
 par(mfrow=c(1,2))
 plot_tsne(cell_coord=getEmb(seur,"tsne"),
-          md=getMD(seur)$nFeature_SCT,
-          md_title="nFeature_SCT",
+          md=getMD(seur)$nFeature_RNA,
+          md_title="nFeature_RNA",
           md_log=F)
 plot_tsne(cell_coord=getEmb(seur,"tsne"),
           md=getMD(seur)$pct_counts_Mito,
@@ -466,32 +685,32 @@ seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca")
     ## To use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'
     ## This message will be shown once per session
 
-    ## 12:20:25 UMAP embedding parameters a = 0.9922 b = 1.112
+    ## 16:25:07 UMAP embedding parameters a = 0.9922 b = 1.112
 
-    ## 12:20:25 Read 1112 rows and found 23 numeric columns
+    ## 16:25:07 Read 1112 rows and found 23 numeric columns
 
-    ## 12:20:25 Using Annoy for neighbor search, n_neighbors = 30
+    ## 16:25:07 Using Annoy for neighbor search, n_neighbors = 30
 
-    ## 12:20:25 Building Annoy index with metric = cosine, n_trees = 50
+    ## 16:25:07 Building Annoy index with metric = cosine, n_trees = 50
 
     ## 0%   10   20   30   40   50   60   70   80   90   100%
 
     ## [----|----|----|----|----|----|----|----|----|----|
 
     ## **************************************************|
-    ## 12:20:25 Writing NN index file to temp file /tmp/Rtmp7T46Ig/file2100608f7d6e
-    ## 12:20:25 Searching Annoy index using 1 thread, search_k = 3000
-    ## 12:20:26 Annoy recall = 100%
-    ## 12:20:26 Commencing smooth kNN distance calibration using 1 thread
-    ## 12:20:27 Initializing from normalized Laplacian + noise
-    ## 12:20:27 Commencing optimization for 500 epochs, with 39546 positive edges
-    ## 12:20:30 Optimization finished
+    ## 16:25:08 Writing NN index file to temp file C:\Users\binnes\AppData\Local\Temp\RtmpeqTto3\file3240229f348
+    ## 16:25:08 Searching Annoy index using 1 thread, search_k = 3000
+    ## 16:25:08 Annoy recall = 100%
+    ## 16:25:08 Commencing smooth kNN distance calibration using 1 thread
+    ## 16:25:09 Initializing from normalized Laplacian + noise
+    ## 16:25:09 Commencing optimization for 500 epochs, with 39502 positive edges
+    ## 16:25:13 Optimization finished
 
 ``` r
 par(mfrow=c(1,2))
 plot_tsne(cell_coord=getEmb(seur,"umap"),
-          md=getMD(seur)$nFeature_SCT,
-          md_title="nFeature_SCT",
+          md=getMD(seur)$nFeature_RNA,
+          md_title="nFeature_RNA",
           md_log=F)
 plot_tsne(cell_coord=getEmb(seur,"umap"),
           md=getMD(seur)$pct_counts_Mito,
@@ -578,16 +797,27 @@ while(DE_bw_clust) {
       )))
       if (temp_cli == length(levels(Idents(seur)))) { 
         message("Clusters unchanged from previous, skipping analysis.")
+        seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
+        seur@meta.data <- seur@meta.data[,-ncol(seur@meta.data)]
         next 
       }
     }
+  }
+  seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
+  if (all(Idents(seur) == seur@meta.data[,ncol(seur@meta.data)])) {
+    levels(seur@meta.data[,ncol(seur@meta.data)]) <- 
+      as.integer(levels(seur@meta.data[,ncol(seur@meta.data)])) + 1
+    seur@active.ident <- seur@meta.data[,ncol(seur@meta.data)]
+    names(seur@active.ident) <- rownames(seur@meta.data)
+  } else {
+    stop("Made stupid assumptions about Seurat's metadata / cluster organization.")
   }
   
   curr_sCVdata <- CalcSCV(
     inD=seur,
     assayType="SCT",
     assaySlot="counts",
-    cl=Idents(seur), 
+    cl=seur@meta.data[,ncol(seur@meta.data)], 
     # ^ your most recent clustering results get stored in the Seurat "ident" slot
     exponent=NA, 
     # ^ going to use the corrected counts from SCTransform
@@ -606,7 +836,7 @@ while(DE_bw_clust) {
   if (min(DE_bw_NN) < min_num_DE) { DE_bw_clust <- FALSE }
   # ^ If no DE genes between nearest neighbours, don't loop again.
   
-  sCVdata_list[[paste0("res.",seurat_resolution)]] <- curr_sCVdata
+  sCVdata_list[[colnames(seur@meta.data)[ncol(seur@meta.data)]]] <- curr_sCVdata
 }
 ```
 
@@ -650,7 +880,7 @@ while(DE_bw_clust) {
 
     ## -- Testing differential expression between clusters --
 
-    ## Number of DE genes between nearest neighbours: 49
+    ## Number of DE genes between nearest neighbours: 51
 
     ## 
 
@@ -668,13 +898,9 @@ while(DE_bw_clust) {
 
     ## -- Testing differential expression between clusters --
 
-    ## Number of DE genes between nearest neighbours: 72
+    ## Number of DE genes between nearest neighbours: 78
 
 ``` r
-seur@meta.data <- seur@meta.data[,colnames(seur@meta.data) != "seurat_clusters"]
-seur@meta.data <- seur@meta.data[,!grepl("^SCT_snn_res",colnames(seur@meta.data))]
-# cleaning redundant metadata
-
 seur <- DietSeurat(seur,dimreducs=Reductions(seur))
 # ^ shrinks the size of the Seurat object by removing the scaled matrix
 
