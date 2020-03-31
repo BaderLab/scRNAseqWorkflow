@@ -1,6 +1,8 @@
 ---
 title: "scRNAseqWorkflow"
 output:
+  pdf_document:
+    
   md_document:
     variant: markdown_github
 ---
@@ -36,7 +38,7 @@ library(scater)
 library(scran)
 library(Seurat)
 library(scClustViz)
-
+library(colorspace)
 ```
 
 ## Read in data
@@ -61,23 +63,25 @@ location <- mapIds(EnsDb.Mmusculus.v79, # EnsDb.Hsapiens.v86 if human
 # ^ you might have to change this depending on your rownames in the data
 rowData(sce)$CHR <- location
 
-sce <- calculateQCMetrics(sce,percent_top=NA,use_spikes=F,
-                          feature_controls=list(Mito=which(location=="MT")))
-rowData(sce)$pct_detected <- 100 - rowData(sce)$pct_dropout_by_counts
-rowData(sce)$mean_detected_counts <- rowData(sce)$mean_counts / (rowData(sce)$pct_detected * 0.01)
+temp_coldata <- perCellQCMetrics(sce,percent_top=NA,flatten=T,
+                                 subsets=list(Mito=which(location=="MT")))
+colData(sce) <- cbind(colData(sce),temp_coldata)
+
+temp_rowdata <- perFeatureQCMetrics(sce,flatten=T)
+rowData(sce) <- cbind(rowData(sce),temp_rowdata)
 ```
 
-Filtering cells based on the proportion of mitochondrial gene transcripts per cell.  A high proportion of mitochondrial gene transcripts are indicative of poor quality cells, probably due to compromised cell membranes. 
+Filtering cells based on the proportion of mitochondrial gene transcripts per cell.  A high proportion of mitochondrial gene transcripts are indicative of poor quality cells, probably due to compromised cell membranes. Keiran Campbell (now at LTRI) has cast some doubt on the validity of using mitochondrial proportion as a determinant of cell health in [this paper](https://doi.org/10.1186/s13059-019-1830-0), so try not to be too aggressive with this filtering.  _You can increase the `mads_thresh` to reduce the number of cells filtered._
 
 ```{r filter_mito, fig.height=4, fig.width=8}
 mads_thresh <- 4
 hard_thresh <- 50
 
-mito_thresh <- median(sce$pct_counts_Mito) + mad(sce$pct_counts_Mito) * mads_thresh
-drop_mito <- sce$pct_counts_Mito > mito_thresh | sce$pct_counts_Mito > hard_thresh
+mito_thresh <- median(sce$subsets_Mito_percent) + mad(sce$subsets_Mito_percent) * mads_thresh
+drop_mito <- sce$subsets_Mito_percent > mito_thresh | sce$subsets_Mito_percent > hard_thresh
 
 par(mar=c(3,3,2,1),mgp=2:0)
-hist(sce$pct_counts_Mito,breaks=50,xlab="% mitochondrial mRNA")
+hist(sce$subsets_Mito_percent,breaks=50,xlab="% mitochondrial mRNA")
 abline(v=mito_thresh,col="red",lwd=2)
 mtext(paste(paste0(mads_thresh," MADs over median: "),
             paste0(round(mito_thresh,2),"% mitochondrial mRNA"),
@@ -85,17 +89,19 @@ mtext(paste(paste0(mads_thresh," MADs over median: "),
             sep="\n"),
       side=3,line=-3,at=mito_thresh,adj=-0.05)
 
-temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
+temp_col <- sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
 par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
-     xlab="total_counts",ylab="total_features",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
+plot(sce$sum,sce$detected,log="xy",pch=20,
+     xlab="Sum of transcript counts per cell",
+     ylab="Number of genes detected per cell",
+     col=temp_col[cut(c(0,1,sce$subsets_Mito_percent),100,labels=F)[c(-1,-2)]])
 legend("topleft",bty="n",title="Mito %",
        legend=c(0,50,100),pch=20,col=temp_col[c(1,50,100)])
-plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
-     xlab="total_counts",ylab="total_features",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
-points(sce$total_counts[drop_mito],sce$total_features_by_counts[drop_mito],
+plot(sce$sum,sce$detected,log="xy",pch=20,
+     xlab="Sum of transcript counts per cell",
+     ylab="Number of genes detected per cell",
+     col=temp_col[cut(c(0,1,sce$subsets_Mito_percent),100,labels=F)[c(-1,-2)]])
+points(sce$sum[drop_mito],sce$detected[drop_mito],
        pch=4,col="red")
 legend("topleft",bty="n",pch=4,col="red",
        title=paste("Mito % >",round(mito_thresh,2)),
@@ -107,29 +113,31 @@ sce <- sce[,!drop_mito]
 show(sce)
 ```
 
-It is important to manually inspect the relationship between library size and gene detection rates per cell to identify obvious outliers.  In this case, we've identified a population of cells with a different relationship between library size and complexity, as well as one cell with a clearly outlying library size.
+It is important to manually inspect the relationship between library size and gene detection rates per cell to identify obvious outliers.  In this case, we've identified a population of cells with a different relationship between library size and complexity, as well as one cell with a clearly outlying library size.  _You can select your outlier cells by changing `filt_intercept` and `filt_slope` to define a line in library size vs. detection rate space._
 
 ```{r filter_outlier,fig.height=4, fig.width=8}
 filt_intercept <- 100
 filt_slope <- .055
-to_inspect <- sce$total_features_by_counts < (sce$total_counts * filt_slope + filt_intercept)
+to_inspect <- sce$detected < (sce$sum * filt_slope + filt_intercept)
 
-temp_col <- colorspace::sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
+temp_col <- sequential_hcl(100,palette="Viridis",alpha=0.5,rev=T)
 par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(sce$total_counts,sce$total_features_by_counts,log="",pch=20,
-     xlab="total_counts",ylab="total_features",
+plot(sce$sum,sce$detected,log="",pch=20,
+     xlab="Sum of transcript counts per cell",
+     ylab="Number of genes detected per cell",
      main="Select outliers to inspect",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
+     col=temp_col[cut(c(0,1,sce$subsets_Mito_percent),100,labels=F)[c(-1,-2)]])
 legend("topleft",bty="n",title="Mito %",
        legend=c(0,50,100),pch=20,col=temp_col[c(1,50,100)])
 abline(filt_intercept,filt_slope,lwd=2,col="red")
 
 
-plot(sce$total_counts,sce$total_features_by_counts,log="xy",pch=20,
-     xlab="total_counts",ylab="total_features",
+plot(sce$sum,sce$detected,log="xy",pch=20,
+     xlab="Sum of transcript counts per cell",
+     ylab="Number of genes detected per cell",
      main="Select outliers to inspect",
-     col=temp_col[cut(c(0,1,sce$pct_counts_Mito),100,labels=F)[c(-1,-2)]])
-points(sce$total_counts[to_inspect],sce$total_features_by_counts[to_inspect],pch=1,col="red")
+     col=temp_col[cut(c(0,1,sce$subsets_Mito_percent),100,labels=F)[c(-1,-2)]])
+points(sce$sum[to_inspect],sce$detected[to_inspect],pch=1,col="red")
 legend("topleft",bty="n",pch=1,col="red",legend="Outliers")
 
 ```
@@ -137,14 +145,14 @@ legend("topleft",bty="n",pch=1,col="red",legend="Outliers")
 By comparing the transcriptomes of the outlier cells to the remaining cells, we see that they're likely erythrocytes and can be removed.
 
 ```{r inspect_outliers,fig.height=4, fig.width=8}
-out_DR <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) sum(X > 0) / length(X))
+out_DR <- RowNNZ(counts(sce)[,to_inspect])/ sum(to_inspect)
 out_MDGE <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) mean(X[X > 0]))
 
 par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(mean_detected_counts~pct_detected,data=rowData(sce),
+plot(mean~detected,data=rowData(sce),
      pch=".",cex=2,log="y",main="Gene expression in all cells",
      xlab="Detection Rate",ylab="Mean Detected Count")
-points(mean_detected_counts~pct_detected,
+points(mean~detected,
        data=rowData(sce)[grep("^Hb[ab]",rowData(sce)$Symbol),],
        pch=20,col="red")
 plot(out_DR,out_MDGE,pch=".",cex=2,log="y",
@@ -153,8 +161,10 @@ plot(out_DR,out_MDGE,pch=".",cex=2,log="y",
 points(out_DR[grep("^Hb[ab]",rowData(sce)$Symbol)],
        out_MDGE[grep("^Hb[ab]",rowData(sce)$Symbol)],
        pch=20,col="red")
-legend("topleft",bty="n",pch=20,col="red",legend="Haemoglobin")
+legend("topleft",pch=20,col="red",legend="Haemoglobin")
 ```
+
+_If you decide to remove these outliers, set `remove_outliers` to `TRUE`._
 
 ```{r apply_filter_outliers}
 remove_outliers <- TRUE
@@ -199,7 +209,7 @@ colData(sce)$CyclonePhase <- cycScores$phases
 colData(sce)$CycloneConfidence <- cycScores$confidence
 ```
 
-```{r}
+```{r fig.height=4, fig.width=8}
 layout(matrix(c(1,2,1,3,1,4),2),widths=c(2,5,1),heights=c(1,9))
 par(mar=rep(0,4),mgp=2:0)
 plot.new()
@@ -207,25 +217,25 @@ title("Cell cycle phase assignment confidence, library sizes, and distribution p
 
 par(mar=c(3,3,1,1),bty="n")
 boxplot(tapply(cycScores$confidence,cycScores$phases,c),
-        col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3"),
+        col=qualitative_hcl(3,alpha=.7,palette="Dark 3"),
         ylab="Normalized score of assigned cell cycle phase")
 
 par(mar=c(3,3,1,1))
-cycDlibSize <- tapply(log10(colData(sce)$total_counts),cycScores$phases,function(X) density(X))
+cycDlibSize <- tapply(log10(colData(sce)$sum),cycScores$phases,function(X) density(X))
 plot(x=NULL,y=NULL,ylab="Density",xlab=expression(Log[10]~"Library Size"),
-     xlim=range(log10(colData(sce)$total_counts)),
+     xlim=range(log10(colData(sce)$sum)),
      ylim=c(min(sapply(cycDlibSize,function(X) min(X$y))),
             max(sapply(cycDlibSize,function(X) max(X$y)))))
 for (x in 1:length(cycDlibSize)) {
   lines(cycDlibSize[[x]],lwd=3,
-        col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3")[x])
+        col=qualitative_hcl(3,alpha=.7,palette="Dark 3")[x])
 }
 legend("topleft",bty="n",horiz=T,lwd=rep(3,3),legend=levels(cycScores$phases),
-       col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3"))
+       col=qualitative_hcl(3,alpha=.7,palette="Dark 3"))
 
 par(mar=c(3,3,1,1))
 barplot(cbind(table(cycScores$phases)),
-  col=colorspace::qualitative_hcl(3,alpha=.7,palette="Dark 3"),
+  col=qualitative_hcl(3,alpha=.7,palette="Dark 3"),
   ylab="Number of cells")
 
 ```
@@ -238,86 +248,81 @@ Normalization is carried out by assigning size factors per gene by the pooling a
 Check that clusters aren't too correlated with library size.
 
 ```{r sum_factors, fig.height=4, fig.width=8}
-temp_qcl <- quickCluster(sce,use.ranks=F,method="igraph",
-                         irlba.args=list(maxit=1000)) # for convergence.
-sce <- computeSumFactors(sce,min.mean=0.01,cluster=temp_qcl)
+temp_qcl <- quickCluster(sce,use.ranks=F,method="igraph")
+sce <- computeSumFactors(sce,cluster=temp_qcl)
 
-par(mfrow=c(1,2),mar=c(3,3,1,1),mgp=2:0)
-plot(sce$total_counts,sizeFactors(sce),log="xy",pch=20,
-     col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3")[temp_qcl])
-legend("topleft",bty="n",horiz=F,legend=levels(temp_qcl),title="Cluster",
-       pch=20,col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3"))
-plot(sce$total_counts,sizeFactors(sce),log="",pch=20,
-     col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3")[temp_qcl])
-legend("topleft",bty="n",horiz=F,legend=levels(temp_qcl),title="Cluster",
-       pch=20,col=colorspace::qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3"))
+par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
+plot(sce$sum,sizeFactors(sce),log="xy",pch=20,main="Coloured by quickCluster",
+     col=qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3")[temp_qcl])
+# legend("topleft",bty="n",horiz=F,legend=levels(temp_qcl),title="Cluster",
+#        pch=20,col=qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3"))
+plot(sce$sum,sizeFactors(sce),log="",pch=20,main="Coloured by quickCluster",
+     col=qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3")[temp_qcl])
+# legend("topleft",bty="n",horiz=F,legend=levels(temp_qcl),title="Cluster",
+#        pch=20,col=qualitative_hcl(length(levels(temp_qcl)),alpha=.7,palette="Dark 3"))
 ```
 
 ```{r normalization}
-sce <- normalize(sce)
+sce <- logNormCounts(sce)
 ```
 
 
 ## Highly-variable genes
-```{r}
-new.trend <- makeTechTrend(x=sce)
-
-fit <- trendVar(sce,use.spikes=FALSE,loess.args=list(span=0.05))
+```{r HVGs, fig.width=6,fig.height=4}
+dec <- modelGeneVar(sce)
 par(mar=c(3,3,2,1),mgp=2:0)
-plot(fit$mean,fit$var,pch=20,
-     xlab="Mean",ylab="Variance")
-curve(fit$trend(x),col="dodgerblue",add=TRUE)
-curve(new.trend(x),col="red",add=TRUE)
+plot(dec$mean,dec$total,pch=20,
+     main="Mean-Variance relationship",
+     xlab="Mean log-expression",ylab="Variance")
+curve(metadata(dec)$trend(x), col="blue", add=TRUE)
 
-fit$trend <- new.trend # overwrite trend.
-dec <- decomposeVar(fit=fit) # use per-gene variance estimates in 'fit'.
-top.dec <- dec[order(dec$bio, decreasing=TRUE),] 
-
+top2kHVGs <- getTopHVGs(dec,n=2000)
 ```
 
 ## To Seurat!
 
+Seurat might warn that it's replacing all dashes in rownames with underscores (ie. mt-Cytb becomes mt_Cytb).  _This is normal._  
+**Check to ensure that the metadata columns you expect to be present made it over from the SCE object.**  Rename metadata columns if necessary to improve legibility.  `sum` used to be `total_counts` and refers to number of transcripts detected per cell. `detected` used to be `total_features` and refers to the number of genes with at least one transcript detected per cell.  `subsets_Mito_*` are the same, but only referring to mitochondrial genes, with `subsets_Mito_percent` being the percent of transcripts per cell from mitochondrial genes.  `total` is the same as `sum`.
+
 ```{r}
 seur <- as.Seurat(sce)
-seur@meta.data <- seur@meta.data[,c("Sample","total_counts","total_features_by_counts",
-                                    "pct_counts_Mito","CyclonePhase","CycloneConfidence")]
-colnames(seur@meta.data)[colnames(seur@meta.data) == "total_features_by_counts"] <- "total_features"
+seur@meta.data <- seur@meta.data[,!colnames(seur@meta.data) %in% c("Sample","Barcode")]
 # ^cleaning up metadata
 ```
 
+Seurat cell cycle prediction uses sets of HGNC symbols to score each cell cycle phase.  If you have mouse data, it will freak out and show a big long warning about how it can't find the genes, then do a case-insensitive match and be just fine. _You can safely ignore this warning._
 ```{r scale_and_cell_cycle}
-seur <- ScaleData(seur,check.for.norm=F)
+seur <- ScaleData(seur,verbose=F)
 seur <- CellCycleScoring(seur,
                          g2m.features=cc.genes$g2m.genes,
                          s.features=cc.genes$s.genes)
 ```
 
 ```{r pca}
-seur <- RunPCA(seur,features=rownames(top.dec)[1:2000],verbose=F)
+seur <- RunPCA(seur,features=top2kHVGs,verbose=F)
 ElbowPlot(seur,ndims=50)
 ```
 
-Select the number of principle components to use in downstream analysis, and set *n_pc* accordingly.
+Select the number of principle components to use in downstream analysis, and _set `n_pc` accordingly_.
 
-```{r tsne}
+```{r tsne, fig.height=5,fig.width=5}
 n_pc <- 20
 
 seur <- RunTSNE(seur,dims=1:n_pc,reduction="pca",perplexity=30)
 plot_tsne(cell_coord=getEmb(seur,"tsne"),
-          md=getMD(seur)$total_counts,
-          md_title="total_counts",
+          md=getMD(seur)$sum,
+          md_title="sum",
           md_log=T)
 ```
+You can add plots for other metadata features of interest (ie. batch) here by _copying the plot code and setting the `md=` argument to a different column of your metadata_.
 
-Playing with the perplexity parameter can improve the visualization.  Perplexity can be interpretted as the number of nearby cells to consider when trying to minimize distance between neighbouring cells.
+Playing with the `perplexity` parameter in `RunTSNE` can improve the visualization.  Perplexity can be interpretted as the number of nearby cells to consider when trying to minimize distance between neighbouring cells.
 
 ```{r umap}
-# only run if you've installed UMAP - see ?RunUMAP
-
-seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca")
+seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca",verbose=F)
 plot_tsne(cell_coord=getEmb(seur,"umap"),
-          md=getMD(seur)$total_counts,
-          md_title="total_counts",
+          md=getMD(seur)$sum,
+          md_title="sum",
           md_log=T)
 ```
 
@@ -408,10 +413,13 @@ seur <- DietSeurat(seur,dimreducs=Reductions(seur))
 save(sCVdata_list,seur,file=output_filename)
 ```
 
-View the scClustViz report by running this code chunk.
+View the scClustViz report by running this code chunk.  Note that the `cellMarkers` argument should be changed to reflect marker genes for your expected clusters.  Or better yet, use a better cluster annotation method (such as [cellassign](https://shahlab.ca/projects/cellassign/), [SingleR](https://bioconductor.org/packages/release/bioc/html/SingleR.html), or [Capybara](https://github.com/morris-lab/Capybara)), then _name the clusters manually as outlined [here](https://baderlab.github.io/scClustViz/#use-your-own-cluster-names)_.
+
 ```{r scClustViz, eval=FALSE, include=TRUE}
 runShiny(output_filename,
-         cellMarkers=list( #change this to suit your needs, or remove it
+         #change CellMarkers to suit your needs, or remove it and 
+         # use ClusterNames to name your clusters (see web for usage).
+         cellMarkers=list( 
            "Cortical precursors"=c("Mki67","Sox2","Pax6","Pcna",
                                    "Nes","Cux1","Cux2"), 
            "Interneurons"=c("Gad1","Gad2","Npy","Sst","Lhx6",
