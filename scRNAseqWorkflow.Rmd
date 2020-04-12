@@ -44,12 +44,95 @@ library(colorspace)
 ## Read in data
 10X Genomics Cell Ranger v3 uses a much better heuristic for determining empty droplets, so its generally safe to go straight to using the filtered matrix.
 
+
+### Single dataset:  
+
+Run this code block to merge a single dataset:
+
 ```{r read_in_data}
 input_from_10x <- "filtered_feature_bc_matrix"
 
 sce <- read10xCounts(input_from_10x,col.names=T)
 sce <- sce[rowSums(counts(sce)) > 0,]
 show(sce)
+```
+
+
+### Merging multiple datasets:
+
+For subsets of cells from multiple datasets, define your subsets here (in the same order you'll load the datasets):
+
+```{r barcodes_to_keep}
+temp_barcodes_to_keep <- list(cluster_10Day_barcodes,
+                              cluster_14Day_barcodes,
+                              cluster_L11Day_barcodes)
+rm(list=temp)
+```
+
+Then run this code block to load and merge multiple datasets.  If no subsetting is needed, just skip the previous block. The vector `temp_data_file_paths` should be set to the folder names of each raw dataset. They can be relative or full filepaths. Name the folder containing the data something meaningful, as it will be used as the dataset label (i.e. rename "mm10" to something useful).
+
+```{r merging_multiples_manually}
+temp_data_file_paths <- c("D:/Dropbox/GDB/MKlab_v1to2/For Brendan/10Day/",
+                          "D:/Dropbox/GDB/MKlab_v1to2/For Brendan/14Day/",
+                          "D:/Dropbox/GDB/MKlab_v1to2/For Brendan/L11Day/")
+# The folder / dataset names are cleaned to 
+# remove anything that isn't a letter or number.
+names(temp_data_file_paths) <- gsub("[^A-Za-z0-9]","",
+                                    sapply(strsplit(temp_data_file_paths,"/"),
+                                           function(X) X[length(X)]))
+
+# Reading raw data, creating a list of SCE objects.
+temp_all_sce <- sapply(temp_data_file_paths,
+                       read10xCounts,
+                       col.names=T,
+                       simplify=F)
+
+# Subsetting each SCE object
+if (exists("temp_barcodes_to_keep")) {
+  temp_all_sce <- mapply(function(SCE,BC) SCE[,BC],
+                         SCE=temp_all_sce,
+                         BC=temp_barcodes_to_keep)
+}
+
+# Collecting all gene names across datasets
+temp_all_genes <- sort(unique(unlist(lapply(temp_all_sce,rownames))))
+
+# Making unified rowData
+temp_rowdata <- do.call("rbind",
+                        lapply(temp_all_sce,function(Y) 
+                          rowData(Y)[,Reduce("intersect",
+                                             lapply(temp_all_sce,
+                                                    function(X) colnames(rowData(X))))]))
+temp_rowdata <- temp_rowdata[!duplicated(rownames(temp_rowdata)),]
+temp_rowdata <- temp_rowdata[temp_all_genes,]
+
+# Adding missing genes to each count matrix and 
+# generating replacement SCEs with missing genes included
+for (i in names(temp_all_sce)) {
+  temp_missing_genes <- temp_all_genes[!temp_all_genes %in% rownames(temp_all_sce[[i]])]
+  temp_new_counts <- rbind(
+    counts(temp_all_sce[[i]]),
+    Matrix(0,nrow=length(temp_missing_genes),ncol=ncol(temp_all_sce[[i]]),
+           dimnames=list(temp_missing_genes,colnames(temp_all_sce[[i]])))
+  )
+  temp_new_counts <- temp_new_counts[temp_all_genes,]
+  colnames(temp_new_counts) <- paste(i,colnames(temp_new_counts),sep="_")
+  temp_sce <- SingleCellExperiment(assays=list(counts=temp_new_counts))
+  rowData(temp_sce) <- temp_rowdata
+  colData(temp_sce) <- colData(temp_all_sce[[i]])[,Reduce("intersect",
+                                                          lapply(temp_all_sce,function(X) 
+                                                            colnames(colData(X))))]
+  colData(temp_sce)$orig.ident <- i
+  rownames(colData(temp_sce)) <- colnames(temp_new_counts)
+  temp_all_sce[[i]] <- temp_sce
+}
+sce <- do.call("cbind",temp_all_sce)
+
+sce <- sce[rowSums(counts(sce)) > 0,]
+show(sce)
+
+# cleaning up
+rm(list=c("i",grep("^temp",ls(),value=T)))
 ```
 
 
@@ -108,8 +191,13 @@ legend("topleft",bty="n",pch=4,col="red",
        legend=paste(sum(drop_mito),"cells"))
 ```
 
+If there aren't any outlier cells that need filtering, its ok to *not* filter any cells by simply skipping the following code block or setting `remove_high_mito` to `FALSE`.
+
 ```{r apply_filter_mito}
-sce <- sce[,!drop_mito]
+remove_high_mito <- TRUE
+if (remove_high_mito) {
+  sce <- sce[,!drop_mito]
+}
 show(sce)
 ```
 
@@ -145,26 +233,28 @@ legend("topleft",bty="n",pch=1,col="red",legend="Outliers")
 By comparing the transcriptomes of the outlier cells to the remaining cells, we see that they're likely erythrocytes and can be removed.
 
 ```{r inspect_outliers,fig.height=4, fig.width=8}
-out_DR <- RowNNZ(counts(sce)[,to_inspect])/ sum(to_inspect)
-out_MDGE <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) mean(X[X > 0]))
-
-par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
-plot(mean~detected,data=rowData(sce),
-     pch=".",cex=2,log="y",main="Gene expression in all cells",
-     xlab="Detection Rate",ylab="Mean Detected Count")
-points(mean~detected,
-       data=rowData(sce)[grep("^Hb[ab]",rowData(sce)$Symbol),],
-       pch=20,col="red")
-plot(out_DR,out_MDGE,pch=".",cex=2,log="y",
-     xlab="Detection Rate",ylab="Mean Detected Count",
-     main="Gene expression in outliers")
-points(out_DR[grep("^Hb[ab]",rowData(sce)$Symbol)],
-       out_MDGE[grep("^Hb[ab]",rowData(sce)$Symbol)],
-       pch=20,col="red")
-legend("topleft",pch=20,col="red",legend="Haemoglobin")
+if (sum(to_inspect) > 0) {
+  out_DR <- RowNNZ(counts(sce)[,to_inspect])/ sum(to_inspect)
+  out_MDGE <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) mean(X[X > 0]))
+  
+  par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
+  plot(mean~detected,data=rowData(sce),
+       pch=".",cex=2,log="y",main="Gene expression in all cells",
+       xlab="Detection Rate",ylab="Mean Detected Count")
+  points(mean~detected,
+         data=rowData(sce)[grep("^Hb[ab]",rowData(sce)$Symbol),],
+         pch=20,col="red")
+  plot(out_DR,out_MDGE,pch=".",cex=2,log="y",
+       xlab="Detection Rate",ylab="Mean Detected Count",
+       main="Gene expression in outliers")
+  points(out_DR[grep("^Hb[ab]",rowData(sce)$Symbol)],
+         out_MDGE[grep("^Hb[ab]",rowData(sce)$Symbol)],
+         pch=20,col="red")
+  legend("topleft",pch=20,col="red",legend="Haemoglobin")
+}
 ```
 
-_If you decide to remove these outliers, set `remove_outliers` to `TRUE`._
+If you decide to remove these outliers, set `remove_outliers` to `TRUE`.
 
 ```{r apply_filter_outliers}
 remove_outliers <- TRUE
@@ -313,17 +403,29 @@ plot_tsne(cell_coord=getEmb(seur,"tsne"),
           md=getMD(seur)$sum,
           md_title="sum",
           md_log=T)
+if ("orig.ident" %in% colnames(getMD(seur))) {
+  plot_tsne(cell_coord=getEmb(seur,"tsne"),
+          md=getMD(seur)$orig.ident,
+          md_title="orig.ident",
+          md_log=T)
+}
 ```
 You can add plots for other metadata features of interest (ie. batch) here by _copying the plot code and setting the `md=` argument to a different column of your metadata_.
 
 Playing with the `perplexity` parameter in `RunTSNE` can improve the visualization.  Perplexity can be interpretted as the number of nearby cells to consider when trying to minimize distance between neighbouring cells.
 
-```{r umap}
+```{r umap, fig.height=5,fig.width=5}
 seur <- RunUMAP(seur,dims=1:n_pc,reduction="pca",verbose=F)
 plot_tsne(cell_coord=getEmb(seur,"umap"),
           md=getMD(seur)$sum,
           md_title="sum",
           md_log=T)
+if ("orig.ident" %in% colnames(getMD(seur))) {
+  plot_tsne(cell_coord=getEmb(seur,"umap"),
+          md=getMD(seur)$orig.ident,
+          md_title="orig.ident",
+          md_log=T)
+}
 ```
 
 
