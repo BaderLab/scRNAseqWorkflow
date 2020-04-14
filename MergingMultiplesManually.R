@@ -72,6 +72,7 @@ for (i in names(temp_all_sce)) {
                                                           lapply(temp_all_sce,function(X) 
                                                             colnames(colData(X))))]
   colData(temp_sce)$orig.ident <- i
+  rownames(colData(temp_sce)) <- colnames(temp_new_counts)
   temp_all_sce[[i]] <- temp_sce
 }
 sce <- do.call("cbind",temp_all_sce)
