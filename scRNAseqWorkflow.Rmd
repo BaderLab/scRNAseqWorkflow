@@ -26,11 +26,24 @@ devtools::install_github("BaderLab/scClustViz")
 
 ```
 
+Please make sure to set `SOURCE_SPECIES` appropriately!
 
 ```{r setup}
-library(EnsDb.Mmusculus.v79) #library(EnsDb.Hsapiens.v86) if human
-library(org.Mm.eg.db) #library(org.Hs.eg.db) if human
+SOURCE_SPECIES <- "mouse" # "human" if the data is from human!
 
+if (SOURCE_SPECIES == "mouse") {
+  library(EnsDb.Mmusculus.v79) 
+  ENSDB <- "EnsDb.Mmusculus.v79"
+  library(org.Mm.eg.db) #library(org.Hs.eg.db) if human
+  EGDB <- "org.Mm.eg.db"
+} else if (SOURCE_SPECIES == "human") {
+  library(EnsDb.Hsapiens.v86)
+  ENSDB <- "EnsDb.Hsapiens.v86"
+  library(org.Hs.eg.db)
+  EGDB <- "org.Hs.eg.db"
+} else {
+  stop('You must set SOURCE_SPECIES to either "mouse" or "human" at the start of this code block!')
+}
 library(AnnotationDbi)
 library(Matrix)
 library(DropletUtils)
@@ -42,10 +55,31 @@ library(colorspace)
 ```
 
 ## Read in data
-10X Genomics Cell Ranger v3 uses a much better heuristic for determining empty droplets, so its generally safe to go straight to using the filtered matrix.
+
+Do *one* of the following things, then skip down to "Filter Cells".
+
+
+### Read data from a count matrix:  
+
+Don't do this blindly!  You need to check your input file to ensure it has column names (`header=T`), rownames in the first column (`row.names=1`), and is separated by tabs (`sep="\t"`).  Otherwise you'll have to adjust the arguments to suit the file.
+
+```{r read_data_from_counts}
+temp_counts <- read.table("count_matrix_text_file.txt",
+                          sep="\t",header=T,row.names=1,
+                          as.is=T,quote="\"")
+sce <- SingleCellExperiment(assays=list(
+  counts=Matrix(as.matrix(temp_counts),sparse=T)
+))
+show(sce)
+
+# cleaning up
+rm(list=grep("^temp",ls(),value=T))
+```
 
 
 ### Single dataset:  
+
+10X Genomics Cell Ranger v3 uses a much better heuristic for determining empty droplets, so its generally safe to go straight to using the filtered matrix.
 
 Run this code block to merge a single dataset:
 
@@ -139,15 +173,22 @@ rm(list=c("i",grep("^temp",ls(),value=T)))
 ## Filter cells
 
 ```{r cell_qc}
-location <- mapIds(EnsDb.Mmusculus.v79, # EnsDb.Hsapiens.v86 if human
-                   keys=rowData(sce)$ID, 
-                   column="SEQNAME",
-                   keytype="GENEID") 
-# ^ you might have to change this depending on your rownames in the data
-rowData(sce)$CHR <- location
+if ("ID" %in% colnames(rowData(sce))) {
+  rowData(sce)$CHR <- mapIds(get(ENSDB),
+                             keys=rowData(sce)$ID, 
+                             column="SEQNAME",
+                             keytype="GENEID") 
+} else {
+  rowData(sce)$CHR <- mapIds(get(ENSDB),
+                             keys=rownames(counts(sce)),
+                             column="SEQNAME",
+                             keytype=findKeyType(rownames(sce),
+                                                 get(ENSDB))) 
+}
 
+  
 temp_coldata <- perCellQCMetrics(sce,percent_top=NA,flatten=T,
-                                 subsets=list(Mito=which(location=="MT")))
+                                 subsets=list(Mito=which(rowData(sce)$CHR=="MT")))
 colData(sce) <- cbind(colData(sce),temp_coldata)
 
 temp_rowdata <- perFeatureQCMetrics(sce,flatten=T)
