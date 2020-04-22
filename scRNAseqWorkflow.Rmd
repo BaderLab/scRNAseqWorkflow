@@ -70,6 +70,25 @@ temp_counts <- read.table("count_matrix_text_file.txt",
 sce <- SingleCellExperiment(assays=list(
   counts=Matrix(as.matrix(temp_counts),sparse=T)
 ))
+if (!all(c("ID","Symbol") %in% colnames(rowData(sce)))) {
+  temp_keytype <- findKeyType(rownames(sce),get(ENSDB))
+  if (temp_keytype != "GENEID") {
+    rowData(sce)$ID <- mapIds(get(ENSDB),
+                              keys=rownames(counts(sce)),
+                              column="GENEID",
+                              keytype=temp_keytype)
+  } else {
+    rowData(sce)$ID <- rownames(sce)
+  }
+  if (temp_keytype != "GENENAME") {
+    rowData(sce)$Symbol <- mapIds(get(ENSDB),
+                                  keys=rownames(counts(sce)),
+                                  column="GENENAME",
+                                  keytype=temp_keytype)
+  } else {
+    rowData(sce)$Symbol <- rownames(sce)
+  }
+}
 show(sce)
 
 # cleaning up
@@ -173,26 +192,20 @@ rm(list=c("i",grep("^temp",ls(),value=T)))
 ## Filter cells
 
 ```{r cell_qc}
-if ("ID" %in% colnames(rowData(sce))) {
-  rowData(sce)$CHR <- mapIds(get(ENSDB),
-                             keys=rowData(sce)$ID, 
-                             column="SEQNAME",
-                             keytype="GENEID") 
-} else {
-  rowData(sce)$CHR <- mapIds(get(ENSDB),
-                             keys=rownames(counts(sce)),
-                             column="SEQNAME",
-                             keytype=findKeyType(rownames(sce),
-                                                 get(ENSDB))) 
-}
+rowData(sce)$CHR <- mapIds(get(ENSDB),
+                           keys=rowData(sce)$ID, 
+                           column="SEQNAME",
+                           keytype="GENEID") 
 
-  
 temp_coldata <- perCellQCMetrics(sce,percent_top=NA,flatten=T,
                                  subsets=list(Mito=which(rowData(sce)$CHR=="MT")))
 colData(sce) <- cbind(colData(sce),temp_coldata)
 
 temp_rowdata <- perFeatureQCMetrics(sce,flatten=T)
 rowData(sce) <- cbind(rowData(sce),temp_rowdata)
+
+# cleaning up
+rm(list=grep("^temp",ls(),value=T))
 ```
 
 Filtering cells based on the proportion of mitochondrial gene transcripts per cell.  A high proportion of mitochondrial gene transcripts are indicative of poor quality cells, probably due to compromised cell membranes. Keiran Campbell (now at LTRI) has cast some doubt on the validity of using mitochondrial proportion as a determinant of cell health in [this paper](https://doi.org/10.1186/s13059-019-1830-0), so try not to be too aggressive with this filtering.  _You can increase the `mads_thresh` to reduce the number of cells filtered._
@@ -274,8 +287,8 @@ legend("topleft",bty="n",pch=1,col="red",legend="Outliers")
 By comparing the transcriptomes of the outlier cells to the remaining cells, we see that they're likely erythrocytes and can be removed.
 
 ```{r inspect_outliers,fig.height=4, fig.width=8}
-if (sum(to_inspect) > 0) {
-  out_DR <- RowNNZ(counts(sce)[,to_inspect])/ sum(to_inspect)
+if (sum(to_inspect) > 1) {
+  out_DR <- RowNNZ(counts(sce)[,to_inspect,drop=F])/ sum(to_inspect)
   out_MDGE <- pbapply::pbapply(counts(sce)[,to_inspect],1,function(X) mean(X[X > 0]))
   
   par(mfrow=c(1,2),mar=c(3,3,2,1),mgp=2:0)
@@ -306,29 +319,25 @@ if (remove_outliers) {
 show(sce)
 ```
 
-## Filter genes
-Remove genes detected in 3 or fewer cells, to prevent errors in normalization.
-```{r filter_genes}
-sce <- sce[rowSums(counts(sce)) >= 3,]
-rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
-# Assign gene symbols as rownames. 
-# You might have to change this depending on your rownames
-show(sce)
-```
 
 ## Cell cycle prediction with cyclone
 Cyclone generates individual scores for each cell cycle phase.  G1 and G2/M are assigned based on these scores, and any cells not strongly scoring for either phase are assigned to S phase. 
 
 ```{r cyclone}
-cycloneSpeciesMarkers <- "mouse_cycle_markers.rds" # "human_cycle_markers.rds"
-egDB <- "org.Mm.eg.db" # "org.Hs.eg.db" if human
+cycloneSpeciesMarkers <- switch(SOURCE_SPECIES,
+                                mouse="mouse_cycle_markers.rds",
+                                human="human_cycle_markers.rds")
 
-anno <- select(get(egDB), keys=rownames(sce), keytype="SYMBOL", column="ENSEMBL")
-cycScores <- cyclone(sce,gene.names=anno$ENSEMBL[match(rownames(sce),anno$SYMBOL)],
-                         pairs=readRDS(system.file("exdata",cycloneSpeciesMarkers,package="scran")))
+cycScores <- cyclone(sce,gene.names=rowData(sce)$ID,
+                     pairs=readRDS(system.file("exdata",cycloneSpeciesMarkers,package="scran")))
 cycScores$phases <- as.factor(cycScores$phases)
-cycScores$confidence <- sapply(seq_along(cycScores$phases),function(i)
-  cycScores$normalized.scores[i,as.character(cycScores$phases[i])])
+cycScores$confidence <- sapply(seq_along(cycScores$phases),function(i) {
+  if (is.na(cycScores$phases[i])) {
+    return(0)
+  } else {
+    return(cycScores$normalized.scores[i,as.character(cycScores$phases[i])])
+  }
+})
 for (l in names(cycScores)) {
   if (is.null(dim(cycScores[[l]]))) {
     names(cycScores[[l]]) <- colnames(sce)
@@ -344,7 +353,7 @@ colData(sce)$CycloneConfidence <- cycScores$confidence
 layout(matrix(c(1,2,1,3,1,4),2),widths=c(2,5,1),heights=c(1,9))
 par(mar=rep(0,4),mgp=2:0)
 plot.new()
-title("Cell cycle phase assignment confidence, library sizes, and distribution per sample",line=-2,cex.main=1.5)
+title("Cell cycle phase assignment confidence, library sizes, and number of cells assigned",line=-2,cex.main=1.5)
 
 par(mar=c(3,3,1,1),bty="n")
 boxplot(tapply(cycScores$confidence,cycScores$phases,c),
@@ -365,11 +374,41 @@ legend("topleft",bty="n",horiz=T,lwd=rep(3,3),legend=levels(cycScores$phases),
        col=qualitative_hcl(3,alpha=.7,palette="Dark 3"))
 
 par(mar=c(3,3,1,1))
-barplot(cbind(table(cycScores$phases)),
-  col=qualitative_hcl(3,alpha=.7,palette="Dark 3"),
-  ylab="Number of cells")
-
+if (any(is.na(cycScores$phases))) {
+  barplot(cbind(c(table(cycScores$phases),sum(is.na(cycScores$phases)))),
+          col=c(qualitative_hcl(3,alpha=.7,palette="Dark 3"),"grey50"),
+          ylab="Number of cells")
+  barplot(cbind(c(table(cycScores$phases),sum(is.na(cycScores$phases)))),
+          col=c(rep(NA,3),"red"),density=c(rep(0,3),20),add=T,
+          ylab="Number of cells")
+  # mtext("Not assigned",side=2,las=1,line=2,
+  #       at=sum(!is.na(cycScores$phases)) + sum(is.na(cycScores$phases)) / 2,
+  #       cex=0.7,col="darkred",font=2)
+  # mtext(expression("" %->% ""),side=2,las=1,line=0,
+  #       at=sum(!is.na(cycScores$phases)) + sum(is.na(cycScores$phases)) / 2,
+  #       cex=0.7,col="darkred",font=2)
+  mtext(expression("Not assigned" %down% ""),
+        at=.85,adj=1,cex=0.7,col="darkred",font=2)
+} else {
+  barplot(cbind(table(cycScores$phases)),
+          col=qualitative_hcl(3,alpha=.7,palette="Dark 3"),
+          ylab="Number of cells")
+}
 ```
+
+Cells not assigned to any phase probably lack expression of a sufficient number of cell cycle genes.  This may be due to a low number of genes detected in those cells (perhaps they are erythrocytes?). It should be possible to filter these cells out in the outlier-filtering step earlier.
+
+
+## Filter genes
+Remove genes detected in 3 or fewer cells, to prevent errors in normalization.
+```{r filter_genes}
+sce <- sce[rowSums(counts(sce)) >= 3,]
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
+# Assign gene symbols as rownames. 
+# You might have to change this depending on your rownames
+show(sce)
+```
+
 
 ## Normalization
 Next step is normalization.  Marioni proposed a normalization technique that attempts to generate cell-specific size factors that are robust to differential expression between genes in a heterogenous sample, unlike simple library-size normalization (https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7).  This method correlates strongly with library size normalization for homogenous samples, but solves a series of linear equations to deconvolute cell-specific size factors for normalization.  In order to better handle heterogenous data, they suggest separating the data by simple heirarchical clustering of a Spearman correlation-based distance metric so that they can normalize the separate subpopulations separately to prevent the suppression of true differential expression during normalization.  
